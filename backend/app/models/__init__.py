@@ -1,0 +1,33 @@
+from app.models.paper import (
+    AnswerSheet,
+    ChatMessage,
+    ChatSession,
+    ConversionJob,
+    ImportJob,
+    KnowledgePoint,
+    Paper,
+    Question,
+    QuestionAnalysis,
+    QuestionAnswer,
+    QuestionKnowledge,
+    QuestionMethod,
+    ReviewRecord,
+    SolutionMethod,
+)
+
+__all__ = [
+    "Paper",
+    "ImportJob",
+    "AnswerSheet",
+    "ConversionJob",
+    "Question",
+    "QuestionAnswer",
+    "ReviewRecord",
+    "KnowledgePoint",
+    "SolutionMethod",
+    "QuestionKnowledge",
+    "QuestionMethod",
+    "QuestionAnalysis",
+    "ChatSession",
+    "ChatMessage",
+]

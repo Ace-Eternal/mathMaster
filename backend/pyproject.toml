@@ -1,0 +1,33 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mathmaster-backend"
+version = "0.1.0"
+description = "MathMaster backend service"
+requires-python = ">=3.11"
+dependencies = [
+  "fastapi>=0.115.0",
+  "uvicorn[standard]>=0.30.0",
+  "sqlalchemy>=2.0.30",
+  "pymysql>=1.1.1",
+  "alembic>=1.13.2",
+  "pydantic>=2.7.0",
+  "pydantic-settings>=2.2.1",
+  "python-multipart>=0.0.9",
+  "httpx>=0.27.0",
+  "requests>=2.32.0",
+  "paramiko>=3.4.0",
+  "orjson>=3.10.0",
+  "tenacity>=8.2.3",
+  "python-slugify>=8.0.4",
+  "pytest>=8.2.0"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
