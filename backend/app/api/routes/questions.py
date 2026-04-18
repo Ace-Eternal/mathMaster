@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import Paper, Question, QuestionKnowledge, QuestionMethod
-from app.schemas.question import QuestionDetailResponse
+from app.models import Paper, Question, QuestionAnalysis, QuestionKnowledge, QuestionMethod
+from app.schemas.question import QuestionDetailResponse, QuestionTagUpdateRequest
 from app.services.storage.base import FileStorageService
 from app.services.storage.factory import get_storage_service
 
@@ -218,3 +218,121 @@ def get_question(question_id: int, request: Request, db: Session = Depends(get_d
 
     payload = _build_question_detail_response_payload(question, assets=assets)
     return QuestionDetailResponse(**payload)
+
+
+@router.patch("/{question_id}/tags", response_model=QuestionDetailResponse)
+def update_question_tags(
+    question_id: int,
+    payload: QuestionTagUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    question = db.execute(
+        select(Question)
+        .options(
+            selectinload(Question.answer),
+            selectinload(Question.analysis),
+            selectinload(Question.knowledges).selectinload(QuestionKnowledge.knowledge_point),
+            selectinload(Question.methods).selectinload(QuestionMethod.solution_method),
+            selectinload(Question.paper).selectinload(Paper.answer_sheet),
+        )
+        .where(Question.id == question_id)
+    ).scalar_one_or_none()
+    if question is None:
+        raise HTTPException(status_code=404, detail="Question not found")
+
+    knowledge_ids = list(dict.fromkeys(payload.knowledge_point_ids))
+    method_ids = list(dict.fromkeys(payload.solution_method_ids))
+    db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id == question.id).delete()
+    db.query(QuestionMethod).filter(QuestionMethod.question_id == question.id).delete()
+
+    for knowledge_id in knowledge_ids:
+        db.add(
+            QuestionKnowledge(
+                question_id=question.id,
+                knowledge_point_id=knowledge_id,
+                source_type="MANUAL",
+                confidence=1.0,
+            )
+        )
+    for method_id in method_ids:
+        db.add(
+            QuestionMethod(
+                question_id=question.id,
+                solution_method_id=method_id,
+                source_type="MANUAL",
+                confidence=1.0,
+            )
+        )
+
+    if question.analysis is not None:
+        analysis_payload = json.loads(question.analysis.analysis_json or "{}")
+        analysis_payload["major_knowledge_points"] = []
+        analysis_payload["minor_knowledge_points"] = []
+        analysis_payload["solution_methods"] = []
+        question.analysis.analysis_json = json.dumps(analysis_payload, ensure_ascii=False)
+        question.analysis.review_status = "APPROVED"
+        db.add(question.analysis)
+
+    db.commit()
+
+    refreshed = db.execute(
+        select(Question)
+        .options(
+            selectinload(Question.answer),
+            selectinload(Question.analysis),
+            selectinload(Question.knowledges).selectinload(QuestionKnowledge.knowledge_point),
+            selectinload(Question.methods).selectinload(QuestionMethod.solution_method),
+            selectinload(Question.paper).selectinload(Paper.answer_sheet),
+        )
+        .where(Question.id == question_id)
+    ).scalar_one()
+
+    if refreshed.analysis is not None:
+        analysis_payload = json.loads(refreshed.analysis.analysis_json or "{}")
+        analysis_payload["major_knowledge_points"] = [
+            link.knowledge_point.name for link in refreshed.knowledges if link.knowledge_point and link.knowledge_point.level == 1
+        ]
+        analysis_payload["minor_knowledge_points"] = [
+            link.knowledge_point.name for link in refreshed.knowledges if link.knowledge_point and link.knowledge_point.level != 1
+        ]
+        analysis_payload["solution_methods"] = [
+            link.solution_method.name for link in refreshed.methods if link.solution_method
+        ]
+        refreshed.analysis.analysis_json = json.dumps(analysis_payload, ensure_ascii=False)
+        db.add(refreshed.analysis)
+        db.commit()
+        db.refresh(refreshed.analysis)
+
+    storage = get_storage_service()
+    assets = {
+        "question_md": storage.read_file(refreshed.question_md_path).decode("utf-8") if refreshed.question_md_path else None,
+        "question_json": json.loads(storage.read_file(refreshed.question_json_path).decode("utf-8"))
+        if refreshed.question_json_path
+        else None,
+    }
+    assets["question_images"] = _extract_images_from_document(storage, request, refreshed.question_json_path, assets["question_json"])
+    assets["paper_pdf_path"] = refreshed.paper.paper_pdf_path if refreshed.paper else None
+    assets["paper_pdf_url"] = None
+    if refreshed.paper and refreshed.paper.paper_pdf_path and storage.exists(refreshed.paper.paper_pdf_path):
+        assets["paper_pdf_url"] = _build_file_url(request, refreshed.paper.paper_pdf_path)
+    if refreshed.answer and refreshed.answer.answer_md_path:
+        assets["answer_md"] = storage.read_file(refreshed.answer.answer_md_path).decode("utf-8")
+    if refreshed.answer and refreshed.answer.answer_json_path:
+        assets["answer_json"] = json.loads(storage.read_file(refreshed.answer.answer_json_path).decode("utf-8"))
+        assets["answer_images"] = _extract_images_from_document(
+            storage,
+            request,
+            refreshed.answer.answer_json_path,
+            assets["answer_json"],
+        )
+    assets["answer_pdf_path"] = refreshed.paper.answer_sheet.answer_pdf_path if refreshed.paper and refreshed.paper.answer_sheet else None
+    assets["answer_pdf_url"] = None
+    if (
+        refreshed.paper
+        and refreshed.paper.answer_sheet
+        and refreshed.paper.answer_sheet.answer_pdf_path
+        and storage.exists(refreshed.paper.answer_sheet.answer_pdf_path)
+    ):
+        assets["answer_pdf_url"] = _build_file_url(request, refreshed.paper.answer_sheet.answer_pdf_path)
+    return QuestionDetailResponse(**_build_question_detail_response_payload(refreshed, assets=assets))

@@ -1,7 +1,24 @@
 from pydantic import BaseModel, Field
 
-from app.schemas.paper import PaperResponse
-from app.schemas.question import QuestionDetailResponse
+
+class PaperSearchItem(BaseModel):
+    id: int
+    title: str
+    year: int | None = None
+    region: str | None = None
+    grade_level: str | None = None
+    term: str | None = None
+    status: str
+
+
+class QuestionSearchItem(BaseModel):
+    id: int
+    paper_id: int
+    paper_title: str
+    question_no: str
+    question_type: str | None = None
+    stem_text: str
+    review_status: str
 
 
 class PaperSearchParams(BaseModel):
@@ -24,4 +41,4 @@ class QuestionSearchParams(BaseModel):
 
 class SearchResponse(BaseModel):
     total: int
-    items: list = Field(default_factory=list)
+    items: list[PaperSearchItem | QuestionSearchItem] = Field(default_factory=list)

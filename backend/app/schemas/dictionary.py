@@ -11,6 +11,14 @@ class KnowledgePointCreate(BaseModel):
     sort_no: int = 0
 
 
+class KnowledgePointUpdate(BaseModel):
+    name: str
+    parent_id: int | None = None
+    level: int
+    subject: str = "math"
+    sort_no: int = 0
+
+
 class KnowledgePointResponse(TimestampedResponse):
     id: int
     name: str
@@ -21,6 +29,12 @@ class KnowledgePointResponse(TimestampedResponse):
 
 
 class SolutionMethodCreate(BaseModel):
+    name: str
+    description: str | None = None
+    subject: str = "math"
+
+
+class SolutionMethodUpdate(BaseModel):
     name: str
     description: str | None = None
     subject: str = "math"

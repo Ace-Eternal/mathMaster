@@ -31,31 +31,36 @@ class KnowledgeAnalysisService:
         )
         result = self._normalize_analysis_result(result=result, question=question)
         self._validate_analysis_result(result=result, question=question)
+        stored_result = self._sanitize_analysis_result(result)
 
         analysis = question.analysis or QuestionAnalysis(question_id=question.id, analysis_json="{}")
-        analysis.analysis_json = json.dumps(result, ensure_ascii=False)
-        analysis.explanation_md = result.get("explanation_md")
+        analysis.analysis_json = json.dumps(stored_result, ensure_ascii=False)
+        analysis.explanation_md = stored_result.get("explanation_md")
         analysis.model_name = settings.default_model_analysis
-        analysis.review_status = "PENDING" if result.get("need_manual_review") else "APPROVED"
+        analysis.review_status = "PENDING" if stored_result.get("need_manual_review") else "APPROVED"
         self.db.add(analysis)
         self.db.flush()
 
         self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id == question.id).delete()
         self.db.query(QuestionMethod).filter(QuestionMethod.question_id == question.id).delete()
 
-        for name in result.get("major_knowledge_points", []):
+        for name in stored_result.get("major_knowledge_points", []):
             kp = self._get_or_create_knowledge_point(name=name, level=1, subject=question.paper.subject if question.paper else "math")
             self.db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
-        for name in result.get("minor_knowledge_points", []):
+        for name in stored_result.get("minor_knowledge_points", []):
             kp = self._get_or_create_knowledge_point(name=name, level=2, subject=question.paper.subject if question.paper else "math")
             self.db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
-        for name in result.get("solution_methods", []):
+        for name in stored_result.get("solution_methods", []):
             method = self._get_or_create_solution_method(name=name, subject=question.paper.subject if question.paper else "math")
             self.db.add(QuestionMethod(question_id=question.id, solution_method_id=method.id, source_type="AUTO"))
 
         self.db.commit()
         self.db.refresh(analysis)
         return analysis
+
+    @staticmethod
+    def _sanitize_analysis_result(result: dict) -> dict:
+        return {key: value for key, value in result.items() if not str(key).startswith("_")}
 
     def _normalize_analysis_result(self, *, result: dict, question: Question) -> dict:
         normalized = dict(result)

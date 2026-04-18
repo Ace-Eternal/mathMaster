@@ -111,6 +111,11 @@ class AnalysisRunResponse(BaseModel):
     needs_review: bool
 
 
+class QuestionTagUpdateRequest(BaseModel):
+    knowledge_point_ids: list[int] = Field(default_factory=list)
+    solution_method_ids: list[int] = Field(default_factory=list)
+
+
 class ChatMessageRequest(BaseModel):
     session_id: int | None = None
     question_id: int
@@ -132,3 +137,12 @@ class ChatSessionResponse(TimestampedResponse):
     question_id: int
     title: str | None = None
     messages: list[ChatMessageResponse] = Field(default_factory=list)
+
+
+class ChatSessionListItemResponse(TimestampedResponse):
+    id: int
+    user_id: str | None = None
+    question_id: int
+    title: str | None = None
+    message_count: int = 0
+    last_message_preview: str | None = None

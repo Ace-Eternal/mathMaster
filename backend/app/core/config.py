@@ -55,9 +55,9 @@ class Settings(BaseSettings):
 
     llm_base_url: str | None = None
     llm_api_key: str | None = None
-    default_model_slice: str = "gpt-5.4-mini"
-    default_model_analysis: str = "gpt-5.4"
-    default_model_chat: str = "gpt-5.4"
+    default_model_slice: str = "gpt-5.4-high"
+    default_model_analysis: str = "gpt-5.4-high"
+    default_model_chat: str = "gpt-5.4-mini"
     fallback_model: str = "claude-sonnet-4.6"
     llm_timeout_seconds: int = 45
     llm_use_mock: bool = True

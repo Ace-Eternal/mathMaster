@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ExpandableText from './ExpandableText.vue'
 import PipelineProgress from './PipelineProgress.vue'
 import StatusBadge from './StatusBadge.vue'
 import type { TaskListItem } from '../utils/paperStatus'
@@ -67,10 +68,10 @@ const formatTime = (value: string | null) => {
             </span>
           </div>
           <div v-if="row.errorSummary" class="error-line">
-            {{ row.errorSummary }}
+            <ExpandableText :text="row.errorSummary" tone="error" :limit="120" />
           </div>
           <div v-else-if="row.note" class="muted inline-note">
-            {{ row.note }}
+            <ExpandableText :text="row.note" :limit="120" />
           </div>
         </template>
       </el-table-column>

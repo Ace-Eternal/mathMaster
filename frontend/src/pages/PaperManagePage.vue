@@ -2,6 +2,7 @@
 import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api/client'
+import ExpandableText from '../components/ExpandableText.vue'
 
 const loading = ref(false)
 const saving = ref(false)
@@ -192,7 +193,16 @@ onMounted(loadPapers)
           <template #default="{ row }">{{ row.answer_sheet?.has_answer ? '已绑定' : '缺失' }}</template>
         </el-table-column>
         <el-table-column prop="pending_review_count" label="待审核" width="100" />
-        <el-table-column prop="latest_error_message" label="最近错误" min-width="220" />
+        <el-table-column label="最近错误" min-width="260">
+          <template #default="{ row }">
+            <ExpandableText
+              :text="row.latest_error_message"
+              empty-text="暂无错误"
+              tone="error"
+              :limit="120"
+            />
+          </template>
+        </el-table-column>
         <el-table-column label="操作" min-width="380" fixed="right">
           <template #default="{ row }">
             <RouterLink :to="`/papers/${row.id}`"><el-button text>详情</el-button></RouterLink>

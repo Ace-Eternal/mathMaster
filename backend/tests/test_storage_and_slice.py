@@ -6,13 +6,15 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models import ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod
+from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, SliceService, normalize_pair_key
+from app.services.chat import ChatTutorService
 from app.services.review import ReviewService
+from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
 
 
@@ -303,6 +305,8 @@ def test_analysis_service_creates_analysis_and_missing_dictionaries():
         analysis = KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
         assert analysis.explanation_md == "先配方，再读出最值。"
         assert db.execute(select(QuestionAnalysis)).scalar_one().question_id == question.id
+        stored_payload = json.loads(analysis.analysis_json)
+        assert "_fallback_notice" not in stored_payload
         knowledge_names = [item.name for item in db.execute(select(KnowledgePoint).order_by(KnowledgePoint.level, KnowledgePoint.name)).scalars()]
         method_names = [item.name for item in db.execute(select(SolutionMethod).order_by(SolutionMethod.name)).scalars()]
         assert knowledge_names == ["函数与导数", "二次函数最值"]
@@ -404,6 +408,36 @@ def test_llm_gateway_normalizes_packy_analysis_shape():
     assert normalized["major_knowledge_points"] == []
     assert normalized["solution_methods"] == []
     assert "正确选项为 A、D。" in normalized["explanation_md"]
+
+
+def test_analysis_service_sanitizes_internal_notice_before_storage():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="概率试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="判断互斥事件。", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="A", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def structured_output(self, *, scenario, model=None, payload=None):
+                return {
+                    "major_knowledge_points": ["概率与统计"],
+                    "minor_knowledge_points": ["互斥事件与对立事件"],
+                    "solution_methods": ["概率计算"],
+                    "explanation_md": "讲解内容",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                    "_fallback_notice": "内部提示",
+                }
+
+        analysis = KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
+        payload = json.loads(analysis.analysis_json)
+        assert "_fallback_notice" not in payload
 
 
 def test_analysis_service_rejects_dictionary_echo_results():
@@ -564,3 +598,200 @@ def test_review_service_create_update_delete_question_syncs_slice_files_and_rela
         review_records = list(db.execute(select(ReviewRecord)).scalars())
         assert any(record.question_id is None for record in review_records)
         assert not storage.exists(answer_md_path)
+
+
+def test_search_service_filters_questions_by_manual_tags():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        knowledge = KnowledgePoint(name="概率与统计", level=1, subject="math", sort_no=1)
+        method = SolutionMethod(name="概率计算", subject="math")
+        db.add_all([knowledge, method])
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="概率题", review_status="APPROVED")
+        other_question = Question(paper_id=paper.id, question_no="2", stem_text="向量题", review_status="APPROVED")
+        db.add_all([question, other_question])
+        db.flush()
+        db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=knowledge.id, source_type="MANUAL"))
+        db.add(QuestionMethod(question_id=question.id, solution_method_id=method.id, source_type="MANUAL"))
+        db.commit()
+
+        result = SearchService(db).search_questions(
+            keyword=None,
+            question_type=None,
+            year=None,
+            knowledge_point_id=knowledge.id,
+            solution_method_id=method.id,
+            page=1,
+            page_size=20,
+        )
+        assert result["total"] == 1
+        assert result["items"][0]["id"] == question.id
+
+
+def test_dictionary_delete_cleans_question_links():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="题干", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        knowledge = KnowledgePoint(name="函数与导数", level=1, subject="math", sort_no=1)
+        method = SolutionMethod(name="分类讨论", subject="math")
+        db.add_all([knowledge, method])
+        db.flush()
+        db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=knowledge.id, source_type="MANUAL"))
+        db.add(QuestionMethod(question_id=question.id, solution_method_id=method.id, source_type="MANUAL"))
+        db.commit()
+
+        db.query(QuestionKnowledge).filter(QuestionKnowledge.knowledge_point_id == knowledge.id).delete()
+        db.query(QuestionMethod).filter(QuestionMethod.solution_method_id == method.id).delete()
+        db.delete(knowledge)
+        db.delete(method)
+        db.commit()
+
+        assert db.execute(select(QuestionKnowledge)).scalar_one_or_none() is None
+        assert db.execute(select(QuestionMethod)).scalar_one_or_none() is None
+
+
+def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    storage.save_file(b'{"image_refs":[{"src":"images/demo.png"}],"blocks":[]}', "slices/1/q_001/question.json")
+    storage.save_file(b"\x89PNG\r\n\x1a\n", "mineu/1/images/demo.png")
+
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="1",
+            stem_text="如图，求线面角。",
+            question_json_path="slices/1/q_001/question.json",
+            review_status="APPROVED",
+        )
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="略", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            captured_messages = None
+
+            def chat(self, *, system_prompt, messages, model=None):
+                StubGateway.captured_messages = messages
+                return {"content": "讲解", "model_name": "stub", "token_usage": 1}
+
+        monkeypatch.setattr("app.services.chat.get_storage_service", lambda: storage)
+        result = ChatTutorService(db, StubGateway()).send(question_id=question.id, content="请讲解", session_id=None, user_id="t")
+        assert result.messages[-1].content == "讲解"
+        first_message = StubGateway.captured_messages[0]
+        assert isinstance(first_message["content"], list)
+        assert any(part.get("type") == "image_url" for part in first_message["content"])
+
+
+def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="2", stem_text="求概率。", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="1/2", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def stream_chat(self, *, system_prompt, messages, model=None):
+                yield {"type": "start", "model_name": "stub-model"}
+                yield {"type": "chunk", "content": "第一步。"}
+                yield {"type": "chunk", "content": "第二步。"}
+
+        monkeypatch.setattr("app.services.chat.get_storage_service", lambda: storage)
+        session_id, event_iter = ChatTutorService(db, StubGateway()).stream_send(
+            question_id=question.id,
+            content="请讲解",
+            session_id=None,
+            user_id="stream",
+        )
+        events = list(event_iter)
+        assert session_id > 0
+        assert events[0]["type"] == "meta"
+        assert events[-1]["type"] == "done"
+        messages = list(db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)).scalars())
+        assert messages[-1].role == "assistant"
+        assert messages[-1].content == "第一步。第二步。"
+
+
+def test_chat_tutor_service_lists_sessions_with_latest_first():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="8", stem_text="题干", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        session_old = ChatSession(question_id=question.id, title="旧会话")
+        session_new = ChatSession(question_id=question.id, title="新会话")
+        db.add_all([session_old, session_new])
+        db.flush()
+        db.add(ChatMessage(session_id=session_old.id, role="user", content="旧消息"))
+        db.add(ChatMessage(session_id=session_new.id, role="user", content="新消息"))
+        db.commit()
+
+        sessions = ChatTutorService(db, LLMGateway()).list_sessions(question_id=question.id)
+        assert [item.id for item in sessions] == [session_new.id, session_old.id]
+
+
+def test_chat_tutor_service_get_session_validates_question():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="9", stem_text="题干", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        session = ChatSession(question_id=question.id, title="会话")
+        db.add(session)
+        db.commit()
+
+        loaded = ChatTutorService(db, LLMGateway()).get_session(session_id=session.id, question_id=question.id)
+        assert loaded.id == session.id
+
+
+def test_llm_gateway_uses_high_for_multimodal_packy_chat():
+    gateway = LLMGateway()
+    gateway.is_packyapi = True
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "请结合题图讲解。"},
+                {"type": "image_url", "image_url": "data:image/png;base64,abc"},
+            ],
+        }
+    ]
+    assert gateway._effective_chat_model(messages=messages, requested_model="gpt-5.4-mini") == "gpt-5.4-high"
+
+
+def test_llm_gateway_keeps_mini_for_text_only_packy_chat():
+    gateway = LLMGateway()
+    gateway.is_packyapi = True
+    messages = [{"role": "user", "content": "请讲解这道题。"}]
+    assert gateway._effective_chat_model(messages=messages, requested_model="gpt-5.4-mini") == "gpt-5.4-mini"

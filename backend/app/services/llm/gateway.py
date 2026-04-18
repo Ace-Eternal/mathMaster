@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 import requests
 
@@ -77,7 +77,7 @@ class LLMGateway:
                 ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
-    def chat(self, *, system_prompt: str, messages: list[dict[str, str]], model: str | None = None) -> dict[str, Any]:
+    def chat(self, *, system_prompt: str, messages: list[dict[str, Any]], model: str | None = None) -> dict[str, Any]:
         if self.use_mock:
             user_message = messages[-1]["content"]
             return {
@@ -86,9 +86,10 @@ class LLMGateway:
                 "token_usage": 128,
             }
         self._ensure_llm_configured()
+        effective_model = self._effective_chat_model(messages=messages, requested_model=model)
 
         request_payload = {
-            "model": model or settings.default_model_chat,
+            "model": effective_model,
             "messages": [{"role": "system", "content": system_prompt}, *messages],
             "temperature": 0.3,
         }
@@ -124,6 +125,53 @@ class LLMGateway:
                         "model_name": data.get("model", fallback_model),
                         "token_usage": data.get("usage", {}).get("total_tokens"),
                     }
+                except Exception as fallback_error:  # noqa: BLE001
+                    fallback_errors.append(f"{fallback_model}: {fallback_error}")
+            if fallback_errors:
+                raise RuntimeError(
+                    "主模型与备用模型均调用失败。"
+                    f" 主模型错误: {primary_error}; 备用模型错误: {' | '.join(fallback_errors)}"
+                ) from primary_error
+            raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
+
+    def stream_chat(self, *, system_prompt: str, messages: list[dict[str, Any]], model: str | None = None) -> Iterator[dict[str, Any]]:
+        if self.use_mock:
+            user_message = messages[-1]["content"]
+            content = f"基于当前题目信息，可以先从已知条件、目标结论和可用方法三部分来分析：{user_message}"
+            yield {"type": "start", "model_name": model or settings.default_model_chat}
+            yield {"type": "chunk", "content": content}
+            return
+        self._ensure_llm_configured()
+        effective_model = self._effective_chat_model(messages=messages, requested_model=model)
+
+        request_payload = {
+            "model": effective_model,
+            "messages": [{"role": "system", "content": system_prompt}, *messages],
+            "temperature": 0.3,
+            "stream": True,
+        }
+        try:
+            active_model, chunk_iter = self._stream_chat_chunks(request_payload=request_payload)
+            yield {"type": "start", "model_name": active_model}
+            for chunk in chunk_iter:
+                if chunk:
+                    yield {"type": "chunk", "content": chunk}
+            return
+        except Exception as primary_error:  # noqa: BLE001
+            fallback_errors: list[str] = []
+            for fallback_model in self._fallback_models(requested_model=str(request_payload["model"])):
+                fallback_payload = {**request_payload, "model": fallback_model}
+                try:
+                    active_model, chunk_iter = self._stream_chat_chunks(request_payload=fallback_payload)
+                    yield {
+                        "type": "start",
+                        "model_name": active_model,
+                        "notice": f"主模型调用失败，已切换备用模型 {fallback_model}: {primary_error}",
+                    }
+                    for chunk in chunk_iter:
+                        if chunk:
+                            yield {"type": "chunk", "content": chunk}
+                    return
                 except Exception as fallback_error:  # noqa: BLE001
                     fallback_errors.append(f"{fallback_model}: {fallback_error}")
             if fallback_errors:
@@ -454,6 +502,14 @@ class LLMGateway:
         raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
 
     def _post_chat_completions_streaming(self, *, request_payload: dict[str, Any]) -> str:
+        model_name, chunk_iter = self._stream_chat_chunks(request_payload={**request_payload, "stream": True})
+        parts = [chunk for chunk in chunk_iter if chunk]
+        content = "".join(parts).strip()
+        if content:
+            return content
+        raise RuntimeError(f"LLM streaming response empty for model {model_name}")
+
+    def _stream_chat_chunks(self, *, request_payload: dict[str, Any]) -> tuple[str, Iterator[str]]:
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {**request_payload, "stream": True}
@@ -462,38 +518,40 @@ class LLMGateway:
 
         for attempt in range(3):
             try:
-                with requests.post(
+                response = requests.post(
                     url,
                     headers=headers,
                     json=payload,
                     timeout=settings.llm_timeout_seconds,
                     stream=True,
-                ) as response:
-                    if not response.ok:
-                        detail = self._extract_error_detail(response)
-                        if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
-                            last_error = RuntimeError(detail)
-                            time.sleep(1.5 * (attempt + 1))
-                            continue
-                        raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
+                )
+                if not response.ok:
+                    detail = self._extract_error_detail(response)
+                    response.close()
+                    if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+                        last_error = RuntimeError(detail)
+                        time.sleep(1.5 * (attempt + 1))
+                        continue
+                    raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
 
-                    parts: list[str] = []
-                    for raw_line in response.iter_lines(decode_unicode=False):
-                        if raw_line in (None, b""):
-                            continue
-                        if not raw_line.startswith(b"data: "):
-                            continue
-                        data = raw_line[6:]
-                        if data == b"[DONE]":
-                            break
-                        chunk = json.loads(data.decode("utf-8"))
-                        delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content")
-                        if delta is not None:
-                            parts.append(delta)
-                    content = "".join(parts).strip()
-                    if content:
-                        return content
-                    raise RuntimeError(f"LLM streaming response empty for model {requested_model}")
+                def iterator() -> Iterator[str]:
+                    try:
+                        for raw_line in response.iter_lines(decode_unicode=False):
+                            if raw_line in (None, b""):
+                                continue
+                            if not raw_line.startswith(b"data: "):
+                                continue
+                            data = raw_line[6:]
+                            if data == b"[DONE]":
+                                break
+                            chunk = json.loads(data.decode("utf-8"))
+                            delta = ((chunk.get("choices") or [{}])[0].get("delta") or {}).get("content")
+                            if delta is not None:
+                                yield delta
+                    finally:
+                        response.close()
+
+                return requested_model, iterator()
             except (requests.RequestException, UnicodeDecodeError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt < 2:
@@ -529,6 +587,27 @@ class LLMGateway:
         if isinstance(content, str) and content.strip():
             return content
         raise RuntimeError(f"LLM returned empty content: {data}")
+
+    def _effective_chat_model(self, *, messages: list[dict[str, Any]], requested_model: str | None) -> str:
+        model_name = requested_model or settings.default_model_chat
+        if not self.is_packyapi:
+            return model_name
+        if model_name != "gpt-5.4-mini":
+            return model_name
+        if self._messages_contain_images(messages):
+            return "gpt-5.4-high"
+        return model_name
+
+    @staticmethod
+    def _messages_contain_images(messages: list[dict[str, Any]]) -> bool:
+        for message in messages:
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if isinstance(part, dict) and str(part.get("type") or "").strip() == "image_url":
+                    return True
+        return False
 
     def _append_model_inventory_hint(self, detail: str, *, requested_model: str) -> str:
         available_models = self._get_available_models()

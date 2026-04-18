@@ -22,7 +22,20 @@ class SearchService:
             stmt = stmt.where(Paper.grade_level == grade_level)
         if term:
             stmt = stmt.where(Paper.term == term)
-        items = list(self.db.execute(stmt).scalars())
+        stmt = stmt.where(Paper.is_deleted.is_(False))
+        papers = list(self.db.execute(stmt).scalars())
+        items = [
+            {
+                "id": paper.id,
+                "title": paper.title,
+                "year": paper.year,
+                "region": paper.region,
+                "grade_level": paper.grade_level,
+                "term": paper.term,
+                "status": paper.status,
+            }
+            for paper in papers
+        ]
         return {"total": len(items), "items": items}
 
     def search_questions(
@@ -36,7 +49,13 @@ class SearchService:
         page: int,
         page_size: int,
     ):
-        stmt = select(Question).join(Paper).options(selectinload(Question.answer)).order_by(Question.created_at.desc())
+        stmt = (
+            select(Question, Paper)
+            .join(Paper)
+            .options(selectinload(Question.answer))
+            .where(Paper.is_deleted.is_(False))
+            .order_by(Question.created_at.desc())
+        )
         if keyword:
             stmt = stmt.where(Question.stem_text.like(f"%{keyword}%"))
         if question_type:
@@ -48,5 +67,17 @@ class SearchService:
         if solution_method_id:
             stmt = stmt.join(QuestionMethod).where(QuestionMethod.solution_method_id == solution_method_id)
         total = self.db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
-        items = list(self.db.execute(stmt.offset((page - 1) * page_size).limit(page_size)).scalars())
+        rows = self.db.execute(stmt.offset((page - 1) * page_size).limit(page_size)).all()
+        items = [
+            {
+                "id": question.id,
+                "paper_id": paper.id,
+                "paper_title": paper.title,
+                "question_no": question.question_no,
+                "question_type": question.question_type,
+                "stem_text": question.stem_text,
+                "review_status": question.review_status,
+            }
+            for question, paper in rows
+        ]
         return {"total": total, "items": items}

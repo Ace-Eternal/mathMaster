@@ -2,6 +2,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
+import ExpandableText from '../components/ExpandableText.vue'
 import PipelineProgress from '../components/PipelineProgress.vue'
 import StatusBadge from '../components/StatusBadge.vue'
 import { deriveTaskFromPaper } from '../utils/paperStatus'
@@ -135,7 +136,7 @@ onMounted(load)
         <PipelineProgress :percentage="task.progress" />
         <div v-if="task.note" class="surface-note" style="margin-top: 16px">{{ task.note }}</div>
         <div v-if="task.errorSummary" class="surface-note detail-error" style="margin-top: 16px">
-          {{ task.errorSummary }}
+          <ExpandableText :text="task.errorSummary" tone="error" :limit="140" />
         </div>
       </section>
 
@@ -164,7 +165,11 @@ onMounted(load)
         <el-table-column prop="status" label="状态" width="120" />
         <el-table-column prop="markdown_path" label="Markdown 路径" min-width="240" />
         <el-table-column prop="json_path" label="JSON 路径" min-width="240" />
-        <el-table-column prop="error_message" label="错误信息" min-width="220" />
+        <el-table-column label="错误信息" min-width="240">
+          <template #default="{ row }">
+            <ExpandableText :text="row.error_message" empty-text="暂无错误" tone="error" :limit="120" />
+          </template>
+        </el-table-column>
       </el-table>
     </section>
 
