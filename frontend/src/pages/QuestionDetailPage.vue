@@ -25,6 +25,17 @@ const activeSessionId = computed(() => session.value?.id ?? null)
 
 const load = async () => {
   detail.value = (await api.get(`/questions/${props.id}`)).data
+  if (detail.value) {
+    localStorage.setItem(
+      'mm:last-question',
+      JSON.stringify({
+        id: detail.value.id,
+        questionNo: detail.value.question_no,
+        paperId: detail.value.paper_id,
+        updatedAt: new Date().toISOString(),
+      })
+    )
+  }
   tagForm.value = {
     knowledge_point_ids: knowledges.value.map((item: any) => item.id),
     solution_method_ids: methods.value.map((item: any) => item.id),

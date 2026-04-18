@@ -27,6 +27,7 @@ const form = ref({
   comment: '',
   reviewer_id: 'local-reviewer',
 })
+const activeSections = ref(['queue'])
 
 const questionImages = computed(() => detail.value?.assets?.question_images || [])
 const answerImages = computed(() => detail.value?.assets?.answer_images || [])
@@ -54,6 +55,15 @@ const loadDetail = async () => {
   form.value.match_status = data.answer?.match_status || 'MANUAL_FIXED'
   form.value.review_status = data.review_status === 'APPROVED' ? 'APPROVED' : 'FIXED'
   form.value.review_note = data.review_note || ''
+  localStorage.setItem(
+    'mm:last-review-question',
+    JSON.stringify({
+      questionId: data.id,
+      paperId: data.paper_id,
+      questionNo: data.question_no,
+      updatedAt: new Date().toISOString(),
+    })
+  )
 }
 
 const selectQuestion = async (questionId: number) => {
@@ -61,12 +71,27 @@ const selectQuestion = async (questionId: number) => {
   await router.replace(`/review/${questionId}`)
 }
 
+const moveSelection = async (direction: 'prev' | 'next') => {
+  if (!queue.value.length || !selectedQuestionId.value) return
+  const currentIndex = queue.value.findIndex((item) => item.question_id === selectedQuestionId.value)
+  if (currentIndex === -1) return
+  const nextIndex = direction === 'next' ? currentIndex + 1 : currentIndex - 1
+  if (nextIndex < 0 || nextIndex >= queue.value.length) return
+  await selectQuestion(queue.value[nextIndex].question_id)
+}
+
 const submitReview = async () => {
   if (!selectedQuestionId.value) return
   await api.post(`/review/questions/${selectedQuestionId.value}`, form.value)
   ElMessage.success('审核结果已保存。')
+  const currentQuestionId = selectedQuestionId.value
   await loadQueue()
-  await loadDetail()
+  const nextCandidate = queue.value.find((item) => item.question_id !== currentQuestionId)
+  if (nextCandidate) {
+    await selectQuestion(nextCandidate.question_id)
+  } else {
+    await loadDetail()
+  }
 }
 
 watch(
@@ -88,78 +113,122 @@ onMounted(async () => {
     <div>
       <div class="page-title">人工审核队列</div>
       <div class="page-subtitle">
-        优先处理低置信度、未匹配答案、缺少定位信息的题目。左侧选择题目，中间查看渲染预览与原 PDF，右侧完成原始文本修正。
+        优先处理低置信度、未匹配答案、缺少定位信息的题目。上方控制流转，下面直接一边查看渲染结果一边修改原始文本，右侧保留原试卷与原答案 PDF 方便比对。
       </div>
     </div>
   </div>
 
   <section class="panel" style="margin-bottom: 18px">
-    <el-form inline>
-      <el-form-item label="审核状态">
-        <el-select v-model="filters.review_status" style="width: 160px">
-          <el-option label="待审核" value="PENDING" />
-          <el-option label="已修复" value="FIXED" />
-          <el-option label="已通过" value="APPROVED" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="答案情况">
-        <el-select v-model="filters.has_answer" clearable style="width: 160px">
-          <el-option label="有答案" :value="true" />
-          <el-option label="缺失答案" :value="false" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="包含已删除">
-        <el-switch v-model="filters.include_deleted" />
-      </el-form-item>
-      <el-button @click="loadQueue">筛选</el-button>
-    </el-form>
-  </section>
-
-  <section class="panel queue-panel" style="margin-bottom: 18px">
-    <h3>待审核题目</h3>
-    <el-table :data="queue" height="320" @row-click="(row: any) => selectQuestion(row.question_id)">
-      <el-table-column prop="paper_title" label="试卷" min-width="220" />
-      <el-table-column prop="question_no" label="题号" width="80" />
-      <el-table-column prop="match_confidence" label="置信度" width="100" />
-      <el-table-column prop="review_note" label="待审核原因" min-width="260" show-overflow-tooltip />
-    </el-table>
+    <div class="review-toolbar">
+      <el-form inline class="review-filter-form">
+        <el-form-item label="审核状态">
+          <el-select v-model="filters.review_status" style="width: 160px">
+            <el-option label="待审核" value="PENDING" />
+            <el-option label="已修复" value="FIXED" />
+            <el-option label="已通过" value="APPROVED" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="答案情况">
+          <el-select v-model="filters.has_answer" clearable style="width: 160px">
+            <el-option label="有答案" :value="true" />
+            <el-option label="缺失答案" :value="false" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="包含已删除">
+          <el-switch v-model="filters.include_deleted" />
+        </el-form-item>
+        <el-button @click="loadQueue">筛选</el-button>
+      </el-form>
+      <div class="action-row review-nav-actions">
+        <el-button @click="moveSelection('prev')" :disabled="!selectedQuestionId">上一题</el-button>
+        <el-button type="primary" plain @click="moveSelection('next')" :disabled="!selectedQuestionId">下一题</el-button>
+      </div>
+    </div>
   </section>
 
   <div class="review-content-grid">
     <section class="panel preview-panel">
-      <h3>渲染预览</h3>
+      <h3>审阅与修正</h3>
       <div v-if="detail" class="section-stack">
         <div class="surface-note">
           页码：{{ detail.page_start || '-' }} ~ {{ detail.page_end || '-' }}<br />
           待审核原因：{{ detail.review_note || '无' }}
         </div>
 
-        <div v-if="questionImages.length" class="image-stack">
-          <div v-for="(image, index) in questionImages" :key="`${index}-${image.src || image.caption || 'img'}`" class="image-card">
-            <img v-if="image.src" :src="image.src" :alt="image.caption || `题图 ${index + 1}`" class="image-card__img" />
-            <div v-else class="surface-note">图片块：{{ image.caption || '当前题图暂无独立图片地址。' }}</div>
-            <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
+        <el-form label-position="top" class="review-edit-form">
+          <div class="review-meta-grid">
+            <el-form-item label="题号">
+              <el-input v-model="form.question_no" />
+            </el-form-item>
+            <el-form-item label="匹配状态">
+              <el-select v-model="form.match_status">
+                <el-option label="自动匹配" value="AUTO_MATCHED" />
+                <el-option label="人工修正" value="MANUAL_FIXED" />
+                <el-option label="未匹配" value="UNMATCHED" />
+              </el-select>
+            </el-form-item>
+            <el-form-item label="审核状态">
+              <el-select v-model="form.review_status">
+                <el-option label="已修复" value="FIXED" />
+                <el-option label="已通过" value="APPROVED" />
+                <el-option label="退回待审核" value="PENDING" />
+              </el-select>
+            </el-form-item>
           </div>
-        </div>
 
-        <div>
-          <h4>题目 Markdown 渲染</h4>
-          <div class="surface-note" style="margin-bottom: 10px">这里展示的是 Markdown 渲染结果，不会改写右侧题干原始文本。</div>
-          <MarkdownContent :content="detail.assets.question_md" />
-        </div>
-
-        <div>
-          <h4>答案 Markdown 渲染</h4>
-          <MarkdownContent :content="detail.assets.answer_md || '暂无答案片段'" />
-        </div>
-
-        <div v-if="answerImages.length" class="image-stack">
-          <div v-for="(image, index) in answerImages" :key="`answer-${index}-${image.src || image.caption || 'img'}`" class="image-card">
-            <img v-if="image.src" :src="image.src" :alt="image.caption || `答案图 ${index + 1}`" class="image-card__img" />
-            <div v-else class="surface-note">图片块：{{ image.caption || '当前答案图暂无独立图片地址。' }}</div>
-            <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
+          <div class="edit-preview-block">
+            <div class="edit-preview-head">
+              <h4>题目</h4>
+              <div class="muted">上方修改原始文本，下方实时查看 Markdown 渲染。</div>
+            </div>
+            <el-form-item label="题干原始文本">
+              <el-input v-model="form.stem_text" type="textarea" :rows="7" />
+            </el-form-item>
+            <div v-if="questionImages.length" class="image-stack">
+              <div v-for="(image, index) in questionImages" :key="`${index}-${image.src || image.caption || 'img'}`" class="image-card">
+                <img v-if="image.src" :src="image.src" :alt="image.caption || `题图 ${index + 1}`" class="image-card__img" />
+                <div v-else class="surface-note">图片块：{{ image.caption || '当前题图暂无独立图片地址。' }}</div>
+                <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
+              </div>
+            </div>
+            <div class="preview-surface">
+              <div class="surface-note" style="margin-bottom: 10px">当前题目渲染效果</div>
+              <MarkdownContent :content="form.stem_text || detail.assets.question_md" />
+            </div>
           </div>
-        </div>
+
+          <div class="edit-preview-block">
+            <div class="edit-preview-head">
+              <h4>答案</h4>
+              <div class="muted">修改答案文本后，下方会实时显示最终渲染效果。</div>
+            </div>
+            <el-form-item label="答案原始文本">
+              <el-input v-model="form.answer_text" type="textarea" :rows="6" />
+            </el-form-item>
+            <div v-if="answerImages.length" class="image-stack">
+              <div v-for="(image, index) in answerImages" :key="`answer-${index}-${image.src || image.caption || 'img'}`" class="image-card">
+                <img v-if="image.src" :src="image.src" :alt="image.caption || `答案图 ${index + 1}`" class="image-card__img" />
+                <div v-else class="surface-note">图片块：{{ image.caption || '当前答案图暂无独立图片地址。' }}</div>
+                <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
+              </div>
+            </div>
+            <div class="preview-surface">
+              <div class="surface-note" style="margin-bottom: 10px">当前答案渲染效果</div>
+              <MarkdownContent :content="form.answer_text || detail.assets.answer_md || '暂无答案片段'" />
+            </div>
+          </div>
+
+          <div class="review-meta-grid review-meta-grid--wide">
+            <el-form-item label="审核备注">
+              <el-input v-model="form.review_note" type="textarea" :rows="3" />
+            </el-form-item>
+            <el-form-item label="操作说明">
+              <el-input v-model="form.comment" type="textarea" :rows="3" />
+            </el-form-item>
+          </div>
+
+          <el-button type="primary" @click="submitReview">保存审核结果</el-button>
+        </el-form>
       </div>
       <el-empty v-else description="请先从左侧选择题目" />
     </section>
@@ -193,60 +262,95 @@ onMounted(async () => {
       <el-empty v-else description="请先从左侧选择题目" />
     </section>
 
-    <section class="panel edit-panel">
-      <h3>人工修正文本</h3>
-      <div v-if="detail">
-        <el-form label-position="top">
-          <el-form-item label="题号">
-            <el-input v-model="form.question_no" />
-          </el-form-item>
-          <el-form-item label="题干">
-            <div class="muted" style="margin-bottom: 8px">这里保存的是原始文本，不会写入渲染后的 HTML。</div>
-            <el-input v-model="form.stem_text" type="textarea" :rows="6" />
-          </el-form-item>
-          <el-form-item label="答案">
-            <el-input v-model="form.answer_text" type="textarea" :rows="5" />
-          </el-form-item>
-          <el-form-item label="匹配状态">
-            <el-select v-model="form.match_status">
-              <el-option label="自动匹配" value="AUTO_MATCHED" />
-              <el-option label="人工修正" value="MANUAL_FIXED" />
-              <el-option label="未匹配" value="UNMATCHED" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="审核状态">
-            <el-select v-model="form.review_status">
-              <el-option label="已修复" value="FIXED" />
-              <el-option label="已通过" value="APPROVED" />
-              <el-option label="退回待审核" value="PENDING" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="审核备注">
-            <el-input v-model="form.review_note" type="textarea" :rows="3" />
-          </el-form-item>
-          <el-form-item label="操作说明">
-            <el-input v-model="form.comment" type="textarea" :rows="3" />
-          </el-form-item>
-          <el-button type="primary" @click="submitReview">保存审核结果</el-button>
-        </el-form>
-      </div>
-      <el-empty v-else description="请选择一个待审核题目" />
-    </section>
   </div>
+
+  <section class="panel queue-panel" style="margin-top: 18px">
+    <el-collapse v-model="activeSections">
+      <el-collapse-item name="queue">
+        <template #title>
+          <div class="queue-header">
+            <span>待审核题目列表</span>
+            <span class="muted">共 {{ queue.length }} 题，可展开选择或收起专注当前审阅。</span>
+          </div>
+        </template>
+        <el-table :data="queue" height="320" @row-click="(row: any) => selectQuestion(row.question_id)">
+          <el-table-column prop="paper_title" label="试卷" min-width="220" />
+          <el-table-column prop="question_no" label="题号" width="80" />
+          <el-table-column prop="match_confidence" label="置信度" width="100" />
+          <el-table-column prop="review_note" label="待审核原因" min-width="260" show-overflow-tooltip />
+        </el-table>
+      </el-collapse-item>
+    </el-collapse>
+  </section>
 </template>
 
 <style scoped>
+.review-toolbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  flex-wrap: wrap;
+}
+
+.review-filter-form {
+  flex: 1 1 720px;
+}
+
+.review-nav-actions {
+  justify-content: flex-end;
+}
+
 .review-content-grid {
   display: grid;
-  grid-template-columns: minmax(360px, 1.1fr) minmax(360px, 1fr) minmax(340px, 0.95fr);
+  grid-template-columns: minmax(520px, 1.25fr) minmax(360px, 1fr);
   gap: 18px;
   align-items: start;
 }
 
 .preview-panel,
-.pdf-panel,
-.edit-panel {
+.pdf-panel {
   min-height: 720px;
+}
+
+.review-edit-form :deep(.el-form-item) {
+  margin-bottom: 16px;
+}
+
+.review-meta-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.review-meta-grid--wide {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.edit-preview-block {
+  display: grid;
+  gap: 12px;
+  padding: 18px;
+  border-radius: 18px;
+  background: rgba(243, 246, 251, 0.72);
+}
+
+.edit-preview-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+}
+
+.edit-preview-head h4 {
+  margin: 0;
+}
+
+.preview-surface {
+  padding: 16px;
+  border-radius: 16px;
+  background: #fff;
+  border: 1px solid var(--mm-border);
 }
 
 .pdf-stack {
@@ -293,13 +397,18 @@ onMounted(async () => {
   background: #fff;
 }
 
+.queue-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding-right: 12px;
+  gap: 12px;
+}
+
 @media (max-width: 1680px) {
   .review-content-grid {
-    grid-template-columns: minmax(360px, 1.1fr) minmax(360px, 1fr);
-  }
-
-  .edit-panel {
-    grid-column: 1 / 3;
+    grid-template-columns: minmax(480px, 1.15fr) minmax(320px, 1fr);
   }
 }
 
@@ -309,9 +418,22 @@ onMounted(async () => {
   }
 
   .preview-panel,
-  .pdf-panel,
-  .edit-panel {
+  .pdf-panel {
     min-height: auto;
+  }
+
+  .review-toolbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .review-nav-actions {
+    justify-content: flex-start;
+  }
+
+  .review-meta-grid,
+  .review-meta-grid--wide {
+    grid-template-columns: 1fr;
   }
 }
 </style>

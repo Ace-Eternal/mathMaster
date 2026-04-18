@@ -27,6 +27,16 @@ const questionTypeOptions = ['选择题', '多选题', '填空题', '解答题']
 
 const load = async () => {
   paper.value = (await api.get(`/papers/${props.id}`)).data
+  if (paper.value) {
+    localStorage.setItem(
+      'mm:last-paper',
+      JSON.stringify({
+        id: paper.value.id,
+        title: paper.value.title,
+        updatedAt: new Date().toISOString(),
+      })
+    )
+  }
 }
 
 const task = computed(() => (paper.value ? deriveTaskFromPaper(paper.value) : null))

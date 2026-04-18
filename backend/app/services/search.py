@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import Paper, Question, QuestionKnowledge, QuestionMethod
+from app.models import Paper, Question, QuestionAnswer, QuestionKnowledge, QuestionMethod
 
 
 class SearchService:
@@ -44,8 +44,14 @@ class SearchService:
         keyword: str | None,
         question_type: str | None,
         year: int | None,
-        knowledge_point_id: int | None,
-        solution_method_id: int | None,
+        region: str | None = None,
+        grade_level: str | None = None,
+        term: str | None = None,
+        review_status: str | None = None,
+        has_answer: bool | None = None,
+        knowledge_point_id: int | None = None,
+        solution_method_id: int | None = None,
+        sort_by: str = "updated_desc",
         page: int,
         page_size: int,
     ):
@@ -54,7 +60,6 @@ class SearchService:
             .join(Paper)
             .options(selectinload(Question.answer))
             .where(Paper.is_deleted.is_(False))
-            .order_by(Question.created_at.desc())
         )
         if keyword:
             stmt = stmt.where(Question.stem_text.like(f"%{keyword}%"))
@@ -62,10 +67,29 @@ class SearchService:
             stmt = stmt.where(Question.question_type == question_type)
         if year:
             stmt = stmt.where(Paper.year == year)
+        if region:
+            stmt = stmt.where(Paper.region == region)
+        if grade_level:
+            stmt = stmt.where(Paper.grade_level == grade_level)
+        if term:
+            stmt = stmt.where(Paper.term == term)
+        if review_status:
+            stmt = stmt.where(Question.review_status == review_status)
         if knowledge_point_id:
             stmt = stmt.join(QuestionKnowledge).where(QuestionKnowledge.knowledge_point_id == knowledge_point_id)
         if solution_method_id:
             stmt = stmt.join(QuestionMethod).where(QuestionMethod.solution_method_id == solution_method_id)
+        if has_answer is True:
+            stmt = stmt.join(QuestionAnswer, QuestionAnswer.question_id == Question.id).where(QuestionAnswer.answer_text.is_not(None))
+        elif has_answer is False:
+            stmt = stmt.outerjoin(QuestionAnswer, QuestionAnswer.question_id == Question.id).where(QuestionAnswer.id.is_(None))
+
+        if sort_by == "question_no":
+            stmt = stmt.order_by(Question.question_no.asc(), Question.updated_at.desc())
+        elif sort_by == "review_first":
+            stmt = stmt.order_by(Question.review_status.asc(), Question.updated_at.desc())
+        else:
+            stmt = stmt.order_by(Question.updated_at.desc())
         total = self.db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
         rows = self.db.execute(stmt.offset((page - 1) * page_size).limit(page_size)).all()
         items = [
@@ -77,6 +101,11 @@ class SearchService:
                 "question_type": question.question_type,
                 "stem_text": question.stem_text,
                 "review_status": question.review_status,
+                "year": paper.year,
+                "region": paper.region,
+                "grade_level": paper.grade_level,
+                "term": paper.term,
+                "has_answer": bool(question.answer and question.answer.answer_text),
             }
             for question, paper in rows
         ]

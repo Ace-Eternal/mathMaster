@@ -299,6 +299,30 @@ const taskItems = computed(() => {
 })
 
 const summary = computed(() => summarizeTasks(taskItems.value))
+const urgentTasks = computed(() => taskItems.value.filter((item) => ['系统异常', 'MineU解析失败', '边界识别失败', '切题匹配失败'].includes(item.stage)).slice(0, 5))
+const reviewTasks = computed(() => taskItems.value.filter((item) => item.pendingReviewCount > 0).slice(0, 5))
+const queuedTasks = computed(() => taskItems.value.filter((item) => item.stage === '待运行').slice(0, 5))
+const recentPaper = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('mm:last-paper') || 'null')
+  } catch {
+    return null
+  }
+})
+const recentQuestion = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('mm:last-question') || 'null')
+  } catch {
+    return null
+  }
+})
+const recentReview = computed(() => {
+  try {
+    return JSON.parse(localStorage.getItem('mm:last-review-question') || 'null')
+  } catch {
+    return null
+  }
+})
 
 onMounted(loadPapers)
 </script>
@@ -307,15 +331,60 @@ onMounted(loadPapers)
   <div class="section-stack">
     <div class="page-header">
       <div>
-        <div class="page-title">试卷任务中心</div>
-        <div class="page-subtitle">
-          在一个页面里完成试卷上传、文件夹导入和导入摘要查看。任务状态与错误摘要会集中展示在上传区域下方。
-        </div>
+        <div class="page-title">工作台</div>
       </div>
       <div class="action-row">
         <el-button :loading="loading" @click="loadPapers">刷新任务</el-button>
       </div>
     </div>
+
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">继续上次工作</div>
+          <div class="muted">保留最近查看试卷、题目和审核进度，方便重新进入处理上下文。</div>
+        </div>
+      </div>
+      <div class="grid cols-2">
+        <div class="surface-note">
+          <div class="resume-title">最近查看试卷</div>
+          <template v-if="recentPaper">
+            <div class="resume-main">{{ recentPaper.title }}</div>
+            <RouterLink :to="`/papers/${recentPaper.id}`" class="resume-link">继续查看试卷</RouterLink>
+          </template>
+          <div v-else class="muted">暂时还没有最近试卷记录。</div>
+        </div>
+        <div class="surface-note">
+          <div class="resume-title">最近查看题目</div>
+          <template v-if="recentQuestion">
+            <div class="resume-main">题目 {{ recentQuestion.questionNo }}</div>
+            <div class="action-row" style="margin-top: 8px">
+              <RouterLink :to="`/questions/${recentQuestion.id}`" class="resume-link">继续看题</RouterLink>
+              <RouterLink :to="`/papers/${recentQuestion.paperId}`" class="resume-link">回到所属试卷</RouterLink>
+            </div>
+          </template>
+          <div v-else class="muted">暂时还没有最近题目记录。</div>
+        </div>
+      </div>
+      <div class="grid cols-2" style="margin-top: 18px">
+        <div class="surface-note">
+          <div class="resume-title">最近审核位置</div>
+          <template v-if="recentReview">
+            <div class="resume-main">题目 {{ recentReview.questionNo }}</div>
+            <RouterLink :to="`/review/${recentReview.questionId}`" class="resume-link">继续审核</RouterLink>
+          </template>
+          <div v-else class="muted">最近还没有审核记录。</div>
+        </div>
+        <div class="surface-note">
+          <div class="resume-title">高频入口</div>
+          <div class="action-row" style="margin-top: 8px">
+            <RouterLink to="/review"><el-button>进入审核台</el-button></RouterLink>
+            <RouterLink to="/search"><el-button>打开题库搜索</el-button></RouterLink>
+            <RouterLink to="/paper-management"><el-button>高级试卷管理</el-button></RouterLink>
+          </div>
+        </div>
+      </div>
+    </section>
 
     <div class="grid cols-2">
       <section class="panel">
@@ -434,6 +503,52 @@ onMounted(loadPapers)
       </el-table>
     </section>
 
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">今日重点</div>
+          <div class="muted">把失败任务、待审核试卷和待运行任务分组展示，优先处理最影响产出的部分。</div>
+        </div>
+      </div>
+      <div class="grid cols-2">
+        <div class="surface-note">
+          <div class="resume-title">失败任务</div>
+          <template v-if="urgentTasks.length">
+            <div v-for="item in urgentTasks" :key="item.id" class="focus-item">
+              <div class="focus-item__title">{{ item.title }}</div>
+              <div class="muted">{{ item.stage }} ｜ {{ item.errorSummary || item.note || '需要人工关注' }}</div>
+              <RouterLink v-if="item.paperId" :to="`/papers/${item.paperId}`" class="resume-link">查看并处理</RouterLink>
+            </div>
+          </template>
+          <div v-else class="muted">当前没有失败任务，整体流程比较健康。</div>
+        </div>
+        <div class="surface-note">
+          <div class="resume-title">待审核试卷</div>
+          <template v-if="reviewTasks.length">
+            <div v-for="item in reviewTasks" :key="`review-${item.id}`" class="focus-item">
+              <div class="focus-item__title">{{ item.title }}</div>
+              <div class="muted">待审核 {{ item.pendingReviewCount }} 道 ｜ 当前阶段 {{ item.stage }}</div>
+              <RouterLink v-if="item.paperId" to="/review" class="resume-link">进入连续审核</RouterLink>
+            </div>
+          </template>
+          <div v-else class="muted">暂时没有待审核积压。</div>
+        </div>
+      </div>
+      <div class="surface-note" style="margin-top: 18px">
+        <div class="resume-title">待运行任务</div>
+        <template v-if="queuedTasks.length">
+          <div class="focus-inline-list">
+            <div v-for="item in queuedTasks" :key="`queued-${item.id}`" class="focus-inline-item">
+              <strong>{{ item.title }}</strong>
+              <span class="muted">尚未执行 MineU 流程</span>
+              <el-button v-if="item.paperId" text type="primary" @click="runPipeline(item.paperId)">立即运行</el-button>
+            </div>
+          </div>
+        </template>
+        <div v-else class="muted">当前没有待运行试卷。</div>
+      </div>
+    </section>
+
     <TaskOverviewCards :summary="summary" />
     <TaskStatusList :items="taskItems" :loading="loading" @rerun="runPipeline" />
   </div>
@@ -462,5 +577,50 @@ input[type='file'] {
   background: rgba(247, 249, 252, 0.78);
   padding: 14px;
   color: var(--mm-text-soft);
+}
+
+.resume-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--mm-text-soft);
+  margin-bottom: 8px;
+}
+
+.resume-main {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--mm-text);
+}
+
+.resume-link {
+  display: inline-block;
+  margin-top: 8px;
+  color: var(--mm-primary-deep);
+  font-weight: 600;
+}
+
+.focus-item + .focus-item {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.focus-item__title {
+  font-weight: 700;
+  color: var(--mm-text);
+  margin-bottom: 4px;
+}
+
+.focus-inline-list {
+  display: grid;
+  gap: 10px;
+}
+
+.focus-inline-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
 }
 </style>
