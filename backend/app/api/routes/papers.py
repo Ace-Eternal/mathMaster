@@ -15,9 +15,11 @@ from app.schemas.paper import (
     PaperUpdateRequest,
     PipelineRunResponse,
 )
+from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import MatchService, PaperPipelineService, SliceService
+from app.services.review import ReviewService
 from app.services.storage.factory import get_storage_service
 
 router = APIRouter()
@@ -142,6 +144,27 @@ def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
 @router.patch("/{paper_id}", response_model=PaperResponse)
 def update_paper(paper_id: int, payload: PaperUpdateRequest, db: Session = Depends(get_db)):
     return get_pipeline_service(db).update_paper(paper_id, payload.model_dump(exclude_unset=True))
+
+
+@router.post("/{paper_id}/questions", response_model=PaperResponse)
+def create_question(paper_id: int, payload: QuestionCreateRequest, db: Session = Depends(get_db)):
+    service = ReviewService(db, get_storage_service())
+    service.create_question(paper_id, payload)
+    return get_pipeline_service(db).get_paper(paper_id)
+
+
+@router.patch("/{paper_id}/questions/{question_id}", response_model=PaperResponse)
+def patch_question(paper_id: int, question_id: int, payload: QuestionUpdateRequest, db: Session = Depends(get_db)):
+    service = ReviewService(db, get_storage_service())
+    service.patch_question(paper_id, question_id, payload)
+    return get_pipeline_service(db).get_paper(paper_id)
+
+
+@router.delete("/{paper_id}/questions/{question_id}", response_model=PaperResponse)
+def delete_question(paper_id: int, question_id: int, db: Session = Depends(get_db)):
+    service = ReviewService(db, get_storage_service())
+    service.delete_question(paper_id, question_id)
+    return get_pipeline_service(db).get_paper(paper_id)
 
 
 @router.delete("/{paper_id}", response_model=PaperResponse)

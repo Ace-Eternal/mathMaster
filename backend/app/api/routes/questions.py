@@ -18,6 +18,55 @@ from app.services.storage.factory import get_storage_service
 router = APIRouter()
 
 
+def _build_question_detail_response_payload(question: Question, *, assets: dict[str, object]) -> dict[str, object]:
+    answer_payload = None
+    if question.answer is not None:
+        answer_payload = {
+            "created_at": question.answer.created_at,
+            "updated_at": question.answer.updated_at,
+            "id": question.answer.id,
+            "answer_text": question.answer.answer_text,
+            "answer_md_path": question.answer.answer_md_path,
+            "answer_json_path": question.answer.answer_json_path,
+            "match_confidence": float(question.answer.match_confidence) if question.answer.match_confidence is not None else None,
+            "match_status": question.answer.match_status,
+        }
+
+    analysis_payload = None
+    if question.analysis is not None:
+        analysis_payload = {
+            "created_at": question.analysis.created_at,
+            "updated_at": question.analysis.updated_at,
+            "id": question.analysis.id,
+            "analysis_json": question.analysis.analysis_json,
+            "explanation_md": question.analysis.explanation_md,
+            "model_name": question.analysis.model_name,
+            "version_no": question.analysis.version_no,
+            "review_status": question.analysis.review_status,
+        }
+
+    return {
+        "created_at": question.created_at,
+        "updated_at": question.updated_at,
+        "id": question.id,
+        "paper_id": question.paper_id,
+        "question_no": question.question_no,
+        "question_type": question.question_type,
+        "stem_text": question.stem_text,
+        "question_md_path": question.question_md_path,
+        "question_json_path": question.question_json_path,
+        "page_start": question.page_start,
+        "page_end": question.page_end,
+        "review_status": question.review_status,
+        "review_note": question.review_note,
+        "answer": answer_payload,
+        "analysis": analysis_payload,
+        "knowledges": [link.knowledge_point for link in question.knowledges if link.knowledge_point],
+        "methods": [link.solution_method for link in question.methods if link.solution_method],
+        "assets": assets,
+    }
+
+
 def _build_file_url(request: Request, storage_key: str) -> str:
     normalized_key = storage_key.replace("\\", "/").lstrip("/")
     if settings.file_service_base_url:
@@ -167,8 +216,5 @@ def get_question(question_id: int, request: Request, db: Session = Depends(get_d
     ):
         assets["answer_pdf_url"] = _build_file_url(request, question.paper.answer_sheet.answer_pdf_path)
 
-    payload = QuestionDetailResponse.model_validate(question).model_dump()
-    payload["knowledges"] = [link.knowledge_point for link in question.knowledges if link.knowledge_point]
-    payload["methods"] = [link.solution_method for link in question.methods if link.solution_method]
-    payload["assets"] = assets
+    payload = _build_question_detail_response_payload(question, assets=assets)
     return QuestionDetailResponse(**payload)

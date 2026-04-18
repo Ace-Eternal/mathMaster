@@ -27,6 +27,9 @@ OPTION_PATTERN = re.compile(r"^[A-D][.．、)]")
 NOISE_PATTERN = re.compile(r"^\s*(第\s*\d+\s*页(?:\s*共\s*\d+\s*页)?|共\s*\d+\s*页|数学试卷|数学答案|考试时间|满分)\s*$")
 SECTION_TITLE_PATTERN = re.compile(r"^[一二三四五六七八九十]+、")
 WATERMARK_PATTERN = re.compile(r"^(微信公众号|浙考神墙|QQ[:：]?\s*\d+)")
+PREAMBLE_PATTERN = re.compile(
+    r"(考生须知|本卷共\d+页|考试时间\d+分钟|答题前|所有答案必须写在答题纸上|考试结束后|只需上交答题纸|准考证号|考场号|座位号)"
+)
 
 
 @dataclass
@@ -144,10 +147,11 @@ class SliceService:
         llm_gateway: LLMGateway,
     ) -> list[BoundaryItem]:
         blocks = self.normalize_document(document_json)
-        marker_hints = self._collect_question_marker_hints(blocks)
+        first_question_section_index = self._find_first_question_section_index(blocks)
+        marker_hints = self._collect_question_marker_hints(blocks, first_question_section_index=first_question_section_index)
         payload = {
             "document_type": "paper",
-            "blocks": self._compact_blocks_for_llm(blocks),
+            "blocks": self._compact_blocks_for_llm(blocks, first_question_section_index=first_question_section_index),
             "question_marker_hints": marker_hints,
             "markdown_excerpt": markdown_text[:6000],
         }
@@ -160,7 +164,11 @@ class SliceService:
             }
             result = llm_gateway.structured_output(scenario="full_paper_boundary", payload=retry_payload)
             items = result.get("items") or []
-        return self._normalize_question_boundaries(items=items, blocks=blocks)
+        return self._normalize_question_boundaries(
+            items=items,
+            blocks=blocks,
+            first_question_section_index=first_question_section_index,
+        )
 
     def detect_answer_boundaries(
         self,
@@ -555,9 +563,16 @@ class SliceService:
             return True
         if WATERMARK_PATTERN.match(normalized):
             return True
+        if PREAMBLE_PATTERN.search(normalized):
+            return True
         return False
 
-    def _compact_blocks_for_llm(self, blocks: list[NormalizedBlock]) -> list[dict[str, Any]]:
+    def _compact_blocks_for_llm(
+        self,
+        blocks: list[NormalizedBlock],
+        *,
+        first_question_section_index: int | None = None,
+    ) -> list[dict[str, Any]]:
         compacted: list[dict[str, Any]] = []
         for block in blocks:
             compacted.append(
@@ -571,16 +586,26 @@ class SliceService:
                     "has_question_marker": bool(self._extract_question_no(block.text)),
                     "has_sub_question_marker": bool(SUBQUESTION_PATTERN.search(block.text)),
                     "is_section_title": bool(SECTION_TITLE_PATTERN.match(block.text)),
+                    "is_before_first_question_section": (
+                        first_question_section_index is not None and block.block_index < first_question_section_index
+                    ),
                 }
             )
         return compacted
 
-    def _collect_question_marker_hints(self, blocks: list[NormalizedBlock]) -> list[dict[str, Any]]:
+    def _collect_question_marker_hints(
+        self,
+        blocks: list[NormalizedBlock],
+        *,
+        first_question_section_index: int | None = None,
+    ) -> list[dict[str, Any]]:
         hints: list[dict[str, Any]] = []
         for block in blocks:
             if not self._extract_question_no(block.text):
                 continue
-            if "答题" in block.text or "注意事项" in block.text:
+            if first_question_section_index is not None and block.block_index < first_question_section_index:
+                continue
+            if PREAMBLE_PATTERN.search(block.text) or "注意事项" in block.text:
                 continue
             hints.append(
                 {
@@ -591,6 +616,16 @@ class SliceService:
                 }
             )
         return hints[:80]
+
+    @staticmethod
+    def _find_first_question_section_index(blocks: list[NormalizedBlock]) -> int | None:
+        for block in blocks:
+            text = block.text.strip()
+            if not SECTION_TITLE_PATTERN.match(text):
+                continue
+            if any(keyword in text for keyword in ("单选题", "多选题", "填空题", "解答题", "选择题")):
+                return block.block_index
+        return None
 
     def _collect_answer_marker_hints(self, blocks: list[NormalizedBlock]) -> list[dict[str, Any]]:
         hints: list[dict[str, Any]] = []
@@ -608,7 +643,13 @@ class SliceService:
                 )
         return hints[:80]
 
-    def _normalize_question_boundaries(self, *, items: list[dict[str, Any]], blocks: list[NormalizedBlock]) -> list[BoundaryItem]:
+    def _normalize_question_boundaries(
+        self,
+        *,
+        items: list[dict[str, Any]],
+        blocks: list[NormalizedBlock],
+        first_question_section_index: int | None = None,
+    ) -> list[BoundaryItem]:
         valid_indices = {block.block_index for block in blocks}
         boundaries: list[BoundaryItem] = []
         for index, item in enumerate(items, start=1):
@@ -641,6 +682,8 @@ class SliceService:
                 continue
             if start_index > end_index:
                 start_index, end_index = end_index, start_index
+            if first_question_section_index is not None and start_index < first_question_section_index:
+                continue
             question_no = str(item.get("question_no") or index).strip()
             if not question_no:
                 question_no = str(index)
@@ -759,7 +802,7 @@ class SliceService:
     @staticmethod
     def _is_probable_question_start(block: NormalizedBlock) -> bool:
         text = block.text.strip()
-        if "答题前" in text or "答题时" in text or "注意事项" in text:
+        if PREAMBLE_PATTERN.search(text) or "答题时" in text or "注意事项" in text:
             return False
         if WATERMARK_PATTERN.match(text):
             return False

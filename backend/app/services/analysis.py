@@ -19,19 +19,18 @@ class KnowledgeAnalysisService:
         question = self.db.execute(
             select(Question).options(selectinload(Question.answer), selectinload(Question.paper)).where(Question.id == question_id)
         ).scalar_one()
-        kp_tree = list(self.db.execute(select(KnowledgePoint).order_by(KnowledgePoint.level, KnowledgePoint.sort_no)).scalars())
-        methods = list(self.db.execute(select(SolutionMethod).order_by(SolutionMethod.name)).scalars())
         result = self.llm_gateway.structured_output(
             scenario="analysis",
             model=settings.default_model_analysis,
             payload={
                 "stem_text": question.stem_text,
                 "answer_text": question.answer.answer_text if question.answer else None,
-                "knowledge_points": [{"id": kp.id, "name": kp.name, "level": kp.level} for kp in kp_tree],
-                "solution_methods": [{"id": method.id, "name": method.name} for method in methods],
+                "question_type": question.question_type,
+                "subject": question.paper.subject if question.paper else "math",
             },
         )
-        result = self._normalize_analysis_result(result=result)
+        result = self._normalize_analysis_result(result=result, question=question)
+        self._validate_analysis_result(result=result, question=question)
 
         analysis = question.analysis or QuestionAnalysis(question_id=question.id, analysis_json="{}")
         analysis.analysis_json = json.dumps(result, ensure_ascii=False)
@@ -58,7 +57,7 @@ class KnowledgeAnalysisService:
         self.db.refresh(analysis)
         return analysis
 
-    def _normalize_analysis_result(self, *, result: dict) -> dict:
+    def _normalize_analysis_result(self, *, result: dict, question: Question) -> dict:
         normalized = dict(result)
         major_points = self._normalize_string_list(normalized.get("major_knowledge_points"))
         minor_points = self._normalize_string_list(normalized.get("minor_knowledge_points"))
@@ -67,8 +66,17 @@ class KnowledgeAnalysisService:
             if generic_points:
                 major_points = generic_points[:1]
                 minor_points = generic_points[1:]
+        inferred_major, inferred_minor, inferred_methods = self._infer_from_question(question=question, result=normalized)
+        if not major_points and inferred_major:
+            major_points = inferred_major
+        if not minor_points and inferred_minor:
+            minor_points = inferred_minor
         solution_methods = self._normalize_solution_methods(normalized.get("solution_methods"))
+        if not solution_methods and inferred_methods:
+            solution_methods = inferred_methods
         explanation_md = str(normalized.get("explanation_md") or "").strip()
+        if not explanation_md:
+            explanation_md = self._build_explanation_from_packy_result(normalized)
         if not explanation_md:
             explanation_md = self._build_explanation_md(major_points=major_points, minor_points=minor_points, solution_methods=solution_methods)
         normalized["major_knowledge_points"] = major_points
@@ -78,6 +86,104 @@ class KnowledgeAnalysisService:
         normalized["confidence"] = self._normalize_confidence(normalized.get("confidence"))
         normalized["need_manual_review"] = bool(normalized.get("need_manual_review"))
         return normalized
+
+    @staticmethod
+    def _build_explanation_from_packy_result(result: dict) -> str:
+        analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        reasoning = analysis.get("reasoning") if isinstance(analysis.get("reasoning"), list) else []
+        parts: list[str] = []
+        for item in reasoning[:4]:
+            if not isinstance(item, dict):
+                continue
+            option = str(item.get("option") or "").strip()
+            judgement = str(item.get("judgement") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+            if not detail:
+                continue
+            prefix = f"{option}：{judgement}。" if option and judgement else ""
+            parts.append(f"{prefix}{detail}".strip())
+        conclusion = str(analysis.get("conclusion") or result.get("conclusion") or "").strip()
+        if conclusion:
+            parts.append(conclusion)
+        return "\n\n".join(part for part in parts if part).strip()
+
+    def _infer_from_question(self, *, question: Question, result: dict) -> tuple[list[str], list[str], list[str]]:
+        stem_text = str(question.stem_text or "")
+        answer_text = str(question.answer.answer_text if question.answer else "")
+        combined = "\n".join(
+            part for part in [
+                stem_text,
+                answer_text,
+                str(result.get("explanation_md") or ""),
+                json.dumps(result.get("analysis") or {}, ensure_ascii=False),
+            ] if part
+        )
+        major_points: list[str] = []
+        minor_points: list[str] = []
+        methods: list[str] = []
+
+        def add_major(name: str) -> None:
+            if name and name not in major_points:
+                major_points.append(name)
+
+        def add_minor(name: str) -> None:
+            if name and name not in minor_points:
+                minor_points.append(name)
+
+        def add_method(name: str) -> None:
+            if name and name not in methods:
+                methods.append(name)
+
+        if any(keyword in combined for keyword in ("概率", "互斥", "对立事件", "独立", "至少1人", "无人击中")):
+            add_major("概率与统计")
+            add_minor("互斥事件与对立事件")
+            add_minor("独立事件概率")
+            add_method("概率计算")
+        if any(keyword in combined for keyword in ("频率分布直方图", "组中值", "百分位数", "众数")):
+            add_major("概率与统计")
+            add_minor("频率分布直方图")
+            if "组中值" in combined:
+                add_minor("组中值估计")
+            add_method("频率分布直方图分析")
+        if any(keyword in combined for keyword in ("向量", "投影向量", "平行", "垂直", "坐标")):
+            add_major("平面向量")
+            if "平行" in combined:
+                add_minor("向量平行的坐标表示")
+            if "投影" in combined:
+                add_minor("向量投影")
+            add_method("向量运算")
+        if any(keyword in combined for keyword in ("复数", "共轭复数", "复平面")):
+            add_major("复数")
+            add_minor("复数的乘法运算")
+            add_method("复数运算")
+        if any(keyword in combined for keyword in ("余弦定理", "正弦定理", "三角形", "sin", "cos", "tan", "角")):
+            add_major("三角函数与解三角形")
+            if "余弦定理" in combined:
+                add_minor("余弦定理")
+            if "tan" in combined or "正切" in combined:
+                add_minor("同角三角函数基本关系")
+            add_method("三角变换")
+        if any(keyword in combined for keyword in ("正方体", "平面", "直线", "二面角", "立体几何", "空间")):
+            add_major("立体几何")
+            add_minor("线面位置关系")
+            add_method("空间几何推理")
+        if not major_points:
+            add_major("高中数学综合")
+        return major_points[:3], minor_points[:5], methods[:3]
+
+    def _validate_analysis_result(self, *, result: dict, question: Question) -> None:
+        major_points = self._normalize_string_list(result.get("major_knowledge_points"))
+        minor_points = self._normalize_string_list(result.get("minor_knowledge_points"))
+        methods = self._normalize_solution_methods(result.get("solution_methods"))
+        if not major_points and not minor_points:
+            raise ValueError(f"题目 {question.id} 的分析结果缺少知识点，拒绝落库。")
+        if len(major_points) + len(minor_points) > 6:
+            raise ValueError(f"题目 {question.id} 的分析结果疑似回显输入词典，拒绝落库。")
+        if len(methods) > 4:
+            raise ValueError(f"题目 {question.id} 的分析结果包含异常多的解法标签，拒绝落库。")
+        explanation_md = str(result.get("explanation_md") or "").strip()
+        if not explanation_md:
+            raise ValueError(f"题目 {question.id} 的分析结果缺少 explanation_md，拒绝落库。")
 
     @staticmethod
     def _normalize_string_list(value: object) -> list[str]:

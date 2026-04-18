@@ -56,14 +56,39 @@ class QuestionDetailResponse(TimestampedResponse):
 
 class ReviewUpdateRequest(BaseModel):
     question_no: str | None = None
+    question_type: str | None = None
     stem_text: str | None = None
     answer_text: str | None = None
     match_status: str | None = None
     review_status: str = "FIXED"
     review_note: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
     comment: str | None = None
     reviewer_id: str | None = None
     review_type: str = "MATCH_CORRECTION"
+
+
+class QuestionCreateRequest(BaseModel):
+    question_no: str
+    question_type: str | None = None
+    stem_text: str
+    answer_text: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    review_status: str = "PENDING"
+    review_note: str | None = None
+
+
+class QuestionUpdateRequest(BaseModel):
+    question_no: str | None = None
+    question_type: str | None = None
+    stem_text: str | None = None
+    answer_text: str | None = None
+    page_start: int | None = None
+    page_end: int | None = None
+    review_status: str | None = None
+    review_note: str | None = None
 
 
 class ReviewQueueItem(ORMModel):

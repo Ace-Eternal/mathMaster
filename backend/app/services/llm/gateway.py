@@ -15,7 +15,7 @@ class LLMGateway:
     def __init__(self) -> None:
         self.base_url = settings.llm_base_url
         self.api_key = settings.llm_api_key
-        self.use_mock = settings.llm_use_mock or not (self.base_url and self.api_key)
+        self.use_mock = bool(settings.llm_use_mock)
         self.is_packyapi = "packyapi.com" in (self.base_url or "")
 
     def _load_prompt(self, filename: str) -> str:
@@ -24,6 +24,7 @@ class LLMGateway:
     def structured_output(self, *, scenario: str, payload: dict[str, Any], model: str | None = None) -> dict[str, Any]:
         if self.use_mock:
             return self._mock_structured_output(scenario=scenario, payload=payload)
+        self._ensure_llm_configured()
 
         system_prompt = {
             "slice_match": self._load_prompt("slice_prompt.md"),
@@ -48,8 +49,9 @@ class LLMGateway:
                 },
             ],
             "temperature": 0.2,
-            "response_format": {"type": "json_object"},
         }
+        if not (self.is_packyapi and scenario == "analysis"):
+            request_payload["response_format"] = {"type": "json_object"}
         try:
             content = self._run_structured_request(request_payload=request_payload)
             return self._normalize_structured_result(scenario=scenario, payload=payload, result=json.loads(content))
@@ -83,6 +85,7 @@ class LLMGateway:
                 "model_name": model or settings.default_model_chat,
                 "token_usage": 128,
             }
+        self._ensure_llm_configured()
 
         request_payload = {
             "model": model or settings.default_model_chat,
@@ -136,6 +139,11 @@ class LLMGateway:
         data = self._post_chat_completions(request_payload=request_payload)
         return self._extract_message_content(data)
 
+    def _ensure_llm_configured(self) -> None:
+        if self.base_url and self.api_key:
+            return
+        raise RuntimeError("LLM 未正确配置，且当前未显式开启 mock。请检查 LLM_BASE_URL、LLM_API_KEY 与 LLM_USE_MOCK。")
+
     def _normalize_structured_result(
         self,
         *,
@@ -145,10 +153,42 @@ class LLMGateway:
     ) -> dict[str, Any]:
         if scenario in {"full_paper_boundary", "full_answer_boundary"}:
             return self._normalize_boundary_result(scenario=scenario, result=result)
+        if scenario == "analysis":
+            return self._normalize_analysis_result(payload=payload, result=result)
         if scenario != "slice_match" and scenario != "global_answer_match":
             return result
 
         return self._normalize_match_result(scenario=scenario, payload=payload, result=result)
+
+    def _normalize_analysis_result(self, *, payload: dict[str, Any], result: dict[str, Any]) -> dict[str, Any]:
+        if "major_knowledge_points" in result or "minor_knowledge_points" in result or "solution_methods" in result:
+            return result
+        analysis = result.get("analysis") if isinstance(result.get("analysis"), dict) else {}
+        reasoning = analysis.get("reasoning") if isinstance(analysis.get("reasoning"), list) else []
+        explanation_parts: list[str] = []
+        for item in reasoning[:4]:
+            if not isinstance(item, dict):
+                continue
+            option = str(item.get("option") or "").strip()
+            judgement = str(item.get("judgement") or "").strip()
+            detail = str(item.get("detail") or "").strip()
+            if detail:
+                prefix = f"{option}：{judgement}。" if option and judgement else ""
+                explanation_parts.append(f"{prefix}{detail}".strip())
+        conclusion = str(analysis.get("conclusion") or result.get("conclusion") or "").strip()
+        if conclusion:
+            explanation_parts.append(conclusion)
+        explanation_md = "\n\n".join(part for part in explanation_parts if part).strip()
+        normalized = {
+            "major_knowledge_points": [],
+            "minor_knowledge_points": [],
+            "solution_methods": [],
+            "explanation_md": explanation_md,
+            "confidence": 0.72,
+            "need_manual_review": False,
+        }
+        normalized["_fallback_notice"] = "已将 PackyAPI 返回的题解型分析结果归一化为项目字段。"
+        return normalized
 
     def _normalize_boundary_result(self, *, scenario: str, result: dict[str, Any]) -> dict[str, Any]:
         items = result.get("items")
@@ -523,6 +563,8 @@ class LLMGateway:
                 return "gpt-5.4-high"
             return settings.default_model_slice
         if scenario == "analysis":
+            if "packyapi.com" in (settings.llm_base_url or ""):
+                return "gpt-5.4-high"
             return settings.default_model_analysis
         return settings.default_model_chat
 

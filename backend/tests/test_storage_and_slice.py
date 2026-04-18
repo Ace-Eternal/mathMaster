@@ -6,11 +6,13 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.base import Base
-from app.models import Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, SolutionMethod
+from app.models import ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod
+from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, SliceService, normalize_pair_key
+from app.services.review import ReviewService
 from app.services.storage.local import LocalFileStorageService
 
 
@@ -80,6 +82,45 @@ def test_normalize_document_expands_list_items_and_skips_page_numbers():
     )
     assert [block.text for block in blocks] == ["12. 第一题", "13. 第二题"]
     assert all(block.block_type == "list_item" for block in blocks)
+
+
+def test_normalize_document_skips_exam_preamble_list_items():
+    service = SliceService()
+    blocks = service.normalize_document(
+        [
+            {"type": "text", "text": "考生须知：", "page_idx": 0},
+            {
+                "type": "list",
+                "list_items": [
+                    "1. 本卷共4页满分150分，考试时间120分钟；",
+                    "2. 答题前，在答题卷指定区域填写班级、姓名、考场号、座位号及准考证号并填涂相应数字；",
+                    "3. 所有答案必须写在答题纸上，写在试卷上无效；",
+                ],
+                "page_idx": 0,
+            },
+            {"type": "text", "text": "1. 某高中三个年级共有学生1200人。", "page_idx": 0},
+        ]
+    )
+    assert [block.text for block in blocks] == ["1. 某高中三个年级共有学生1200人。"]
+
+
+def test_question_marker_hints_only_start_after_question_section():
+    service = SliceService()
+    blocks = service.normalize_document(
+        [
+            {"type": "text", "text": "2024学年第二学期高一期末联考", "page_idx": 0},
+            {"type": "text", "text": "考生须知：", "page_idx": 0},
+            {"type": "list", "list_items": ["1. 本卷共4页满分150分，考试时间120分钟；"], "page_idx": 0},
+            {"type": "text", "text": "一、单选题：本题共8小题", "page_idx": 0},
+            {"type": "text", "text": "1. 某高中三个年级共有学生1200人。", "page_idx": 0},
+            {"type": "text", "text": "2. 已知向量m=(3,1)。", "page_idx": 0},
+        ]
+    )
+    first_section = service._find_first_question_section_index(blocks)
+    hints = service._collect_question_marker_hints(blocks, first_question_section_index=first_section)
+    assert first_section is not None
+    assert [hint["question_no"] for hint in hints] == ["1", "2"]
+    assert all(hint["block_index"] >= first_section for hint in hints)
 
 
 def test_build_question_slices_uses_boundaries_and_marks_duplicate_question_no():
@@ -249,6 +290,7 @@ def test_analysis_service_creates_analysis_and_missing_dictionaries():
         class StubGateway:
             def structured_output(self, *, scenario, model=None, payload=None):
                 assert scenario == "analysis"
+                assert sorted(payload.keys()) == ["answer_text", "question_type", "stem_text", "subject"]
                 return {
                     "major_knowledge_points": ["函数与导数"],
                     "minor_knowledge_points": ["二次函数最值"],
@@ -300,3 +342,225 @@ def test_analysis_service_normalizes_generic_knowledge_points_and_long_method_se
         assert payload["minor_knowledge_points"] == ["频率分布直方图", "组中值估计"]
         assert payload["solution_methods"] == ["频率分布直方图分析", "组中值估计"]
         assert "主要知识点" in (analysis.explanation_md or "")
+
+
+def test_analysis_service_infers_knowledge_points_from_packy_solution_schema():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="概率试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="10",
+            question_type="多选题",
+            stem_text="甲乙两人独立射击同一个靶子，判断互斥事件、对立事件与独立事件。",
+            review_status="APPROVED",
+        )
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="AD", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def structured_output(self, *, scenario, model=None, payload=None):
+                return {
+                    "correct_options": ["A", "D"],
+                    "selected_answer": "AD",
+                    "is_answer_correct": True,
+                    "analysis": {
+                        "reasoning": [
+                            {"option": "A", "judgement": "正确", "detail": "两事件不能同时发生，因此互斥。"},
+                            {"option": "C", "judgement": "错误", "detail": "利用独立事件概率公式判断。"},
+                        ],
+                        "conclusion": "正确选项为 A、D。",
+                    },
+                }
+
+        analysis = KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
+        payload = json.loads(analysis.analysis_json)
+        assert payload["major_knowledge_points"] == ["概率与统计"]
+        assert "互斥事件与对立事件" in payload["minor_knowledge_points"]
+        assert "概率计算" in payload["solution_methods"]
+        assert "正确选项为 A、D。" in (analysis.explanation_md or "")
+
+
+def test_llm_gateway_normalizes_packy_analysis_shape():
+    gateway = LLMGateway()
+    normalized = gateway._normalize_structured_result(
+        scenario="analysis",
+        payload={"stem_text": "概率题"},
+        result={
+            "correct_options": ["A", "D"],
+            "analysis": {
+                "reasoning": [
+                    {"option": "A", "judgement": "正确", "detail": "两事件不能同时发生。"},
+                ],
+                "conclusion": "正确选项为 A、D。",
+            },
+        },
+    )
+    assert normalized["major_knowledge_points"] == []
+    assert normalized["solution_methods"] == []
+    assert "正确选项为 A、D。" in normalized["explanation_md"]
+
+
+def test_analysis_service_rejects_dictionary_echo_results():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="求函数最值。", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="最小值为0", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def structured_output(self, *, scenario, model=None, payload=None):
+                return {
+                    "major_knowledge_points": ["函数与导数"],
+                    "minor_knowledge_points": ["二次函数最值", "导数求单调区间", "导数求极值", "导数求最值", "分类讨论"],
+                    "solution_methods": ["分类讨论", "导数分析", "换元法", "数形结合", "待定系数法"],
+                    "explanation_md": "这是一次异常回显。",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                }
+
+        try:
+            KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
+        except ValueError as exc:
+            assert "回显输入词典" in str(exc) or "异常多的解法标签" in str(exc)
+        else:
+            raise AssertionError("应当拒绝异常宽泛的分析结果")
+
+
+def test_llm_gateway_only_uses_mock_when_explicitly_enabled():
+    from app.core.config import settings
+
+    original_use_mock = settings.llm_use_mock
+    original_base_url = settings.llm_base_url
+    original_api_key = settings.llm_api_key
+    try:
+        settings.llm_use_mock = False
+        settings.llm_base_url = None
+        settings.llm_api_key = None
+        gateway = LLMGateway()
+        assert gateway.use_mock is False
+        try:
+            gateway.structured_output(scenario="analysis", payload={"stem_text": "题干"})
+        except RuntimeError as exc:
+            assert "未正确配置" in str(exc)
+        else:
+            raise AssertionError("未配置 LLM 时不应自动回退到 mock")
+    finally:
+        settings.llm_use_mock = original_use_mock
+        settings.llm_base_url = original_base_url
+        settings.llm_api_key = original_api_key
+
+
+def test_review_service_build_question_detail_response_handles_analysis_links(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="36", stem_text="题干", review_status="PENDING")
+        db.add(question)
+        db.flush()
+        analysis = QuestionAnalysis(question_id=question.id, analysis_json='{"ok":true}', explanation_md="讲解")
+        kp = KnowledgePoint(name="函数与导数", level=1, subject="math", sort_no=1)
+        method = SolutionMethod(name="分类讨论", subject="math")
+        db.add_all([analysis, kp, method])
+        db.flush()
+        db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
+        db.add(QuestionMethod(question_id=question.id, solution_method_id=method.id, source_type="AUTO"))
+        db.commit()
+
+        payload = ReviewService(db, storage).build_question_detail_response(question.id)
+        assert payload.id == question.id
+        assert payload.knowledges[0].name == "函数与导数"
+        assert payload.methods[0].name == "分类讨论"
+        assert payload.analysis.explanation_md == "讲解"
+
+
+def test_review_service_create_update_delete_question_syncs_slice_files_and_relations(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.commit()
+        service = ReviewService(db, storage)
+
+        created = service.create_question(
+            paper.id,
+            QuestionCreateRequest(
+                question_no="12",
+                question_type="填空题",
+                stem_text="12. 这是新增题目",
+                answer_text="新增答案",
+                page_start=2,
+                page_end=2,
+            ),
+        )
+        assert storage.exists(created.question_md_path)
+        assert storage.exists(created.question_json_path)
+        assert created.answer is not None
+        assert storage.exists(created.answer.answer_md_path)
+
+        original_question_path = created.question_md_path
+        updated = service.patch_question(
+            paper.id,
+            created.id,
+            QuestionUpdateRequest(
+                question_no="13",
+                question_type="解答题",
+                stem_text="13. 修改后的题干",
+                answer_text="修改后的答案",
+                page_start=3,
+                page_end=4,
+                review_note="人工调整",
+            ),
+        )
+        assert updated.question_no == "13"
+        assert updated.question_type == "解答题"
+        assert updated.answer.answer_text == "修改后的答案"
+        assert updated.question_md_path != original_question_path
+        assert storage.exists(updated.question_md_path)
+        assert not storage.exists(original_question_path)
+
+        analysis = QuestionAnalysis(question_id=updated.id, analysis_json="{}", explanation_md="分析")
+        db.add(analysis)
+        db.flush()
+        kp = KnowledgePoint(name="空间几何", level=1, subject="math", sort_no=1)
+        method = SolutionMethod(name="空间向量法", subject="math")
+        db.add_all([kp, method])
+        db.flush()
+        db.add(QuestionKnowledge(question_id=updated.id, knowledge_point_id=kp.id, source_type="AUTO"))
+        db.add(QuestionMethod(question_id=updated.id, solution_method_id=method.id, source_type="AUTO"))
+        db.add(ReviewRecord(paper_id=paper.id, question_id=updated.id, review_type="SLICE_EDIT"))
+        db.flush()
+        chat = ChatSession(question_id=updated.id, title="问答")
+        db.add(chat)
+        db.commit()
+
+        question_id = updated.id
+        answer_md_path = updated.answer.answer_md_path
+        service.delete_question(paper.id, question_id)
+
+        assert db.get(Question, question_id) is None
+        assert db.execute(select(QuestionAnswer).where(QuestionAnswer.question_id == question_id)).scalar_one_or_none() is None
+        assert db.execute(select(QuestionAnalysis).where(QuestionAnalysis.question_id == question_id)).scalar_one_or_none() is None
+        assert db.execute(select(QuestionKnowledge).where(QuestionKnowledge.question_id == question_id)).scalar_one_or_none() is None
+        assert db.execute(select(QuestionMethod).where(QuestionMethod.question_id == question_id)).scalar_one_or_none() is None
+        assert db.execute(select(ChatSession).where(ChatSession.question_id == question_id)).scalar_one_or_none() is None
+        review_records = list(db.execute(select(ReviewRecord)).scalars())
+        assert any(record.question_id is None for record in review_records)
+        assert not storage.exists(answer_md_path)

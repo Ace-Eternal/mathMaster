@@ -10,6 +10,7 @@
 - `has_question_marker`
 - `has_sub_question_marker`
 - `is_section_title`
+- `is_before_first_question_section`
 
 输入中的 `question_marker_hints` 是系统预抽取的疑似题目起点提示。它们可能包含误报，但通常接近真实题目开始位置。
 
@@ -17,6 +18,7 @@
 
 请遵守以下规则：
 - 只输出真实题目，不要把页码、页眉、页脚、注意事项、大题标题当作题目
+- 如果某个 block 的 `is_before_first_question_section=true`，通常说明它位于“考生须知/前言区”，即使它带有 `1.` `2.` 之类编号，也不能当作题目起点
 - 题目边界必须覆盖属于该题的连续 block 范围
 - 优先参考 `question_marker_hints` 与 `has_question_marker=true` 的 block 来确定每道题的起点
 - 题号必须使用卷面真实题号，例如 `1`、`15`、`19`
