@@ -305,12 +305,13 @@ onMounted(async () => {
   display: grid;
   grid-template-columns: minmax(520px, 1.25fr) minmax(360px, 1fr);
   gap: 18px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .preview-panel,
 .pdf-panel {
   min-height: 720px;
+  height: 100%;
 }
 
 .review-edit-form :deep(.el-form-item) {
@@ -355,12 +356,16 @@ onMounted(async () => {
 
 .pdf-stack {
   display: grid;
+  grid-template-rows: repeat(2, minmax(0, 1fr));
   gap: 16px;
+  height: 100%;
 }
 
 .pdf-card {
   display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  min-height: 0;
 }
 
 .pdf-card__header {
@@ -372,7 +377,8 @@ onMounted(async () => {
 
 .pdf-frame {
   width: 100%;
-  height: 340px;
+  height: 100%;
+  min-height: 520px;
   border: 1px solid var(--mm-border);
   border-radius: 16px;
   background: #fff;
@@ -420,6 +426,17 @@ onMounted(async () => {
   .preview-panel,
   .pdf-panel {
     min-height: auto;
+    height: auto;
+  }
+
+  .pdf-stack {
+    grid-template-rows: none;
+    height: auto;
+  }
+
+  .pdf-frame {
+    height: 420px;
+    min-height: 420px;
   }
 
   .review-toolbar {

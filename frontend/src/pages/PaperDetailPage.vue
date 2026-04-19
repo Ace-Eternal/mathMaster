@@ -25,6 +25,37 @@ const form = reactive({
 })
 const questionTypeOptions = ['选择题', '多选题', '填空题', '解答题']
 
+const buildQuestionNoSortKey = (questionNo?: string | null) => {
+  const normalized = String(questionNo || '').trim()
+  if (!normalized) return { hasDigit: 1, parts: [''] as Array<string | number> }
+  const parts = normalized.split(/(\d+)/).filter(Boolean)
+  const naturalParts = parts.map((part) => (/^\d+$/.test(part) ? Number(part) : part))
+  const hasDigit = naturalParts.some((part) => typeof part === 'number') ? 0 : 1
+  return { hasDigit, parts: naturalParts.length ? naturalParts : [normalized] }
+}
+
+const compareQuestionNo = (left?: string | null, right?: string | null) => {
+  const leftKey = buildQuestionNoSortKey(left)
+  const rightKey = buildQuestionNoSortKey(right)
+  if (leftKey.hasDigit !== rightKey.hasDigit) return leftKey.hasDigit - rightKey.hasDigit
+  const maxLength = Math.max(leftKey.parts.length, rightKey.parts.length)
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftPart = leftKey.parts[index]
+    const rightPart = rightKey.parts[index]
+    if (leftPart === undefined) return -1
+    if (rightPart === undefined) return 1
+    if (typeof leftPart === 'number' && typeof rightPart === 'number') {
+      if (leftPart !== rightPart) return leftPart - rightPart
+      continue
+    }
+    const leftText = String(leftPart)
+    const rightText = String(rightPart)
+    const delta = leftText.localeCompare(rightText, 'zh-Hans-CN')
+    if (delta !== 0) return delta
+  }
+  return 0
+}
+
 const load = async () => {
   paper.value = (await api.get(`/papers/${props.id}`)).data
   if (paper.value) {
@@ -40,6 +71,13 @@ const load = async () => {
 }
 
 const task = computed(() => (paper.value ? deriveTaskFromPaper(paper.value) : null))
+const sortedQuestions = computed(() =>
+  [...(paper.value?.questions || [])].sort((left, right) => {
+    const questionNoDelta = compareQuestionNo(left.question_no, right.question_no)
+    if (questionNoDelta !== 0) return questionNoDelta
+    return Number(left.id || 0) - Number(right.id || 0)
+  })
+)
 
 const resetForm = () => {
   form.question_no = ''
@@ -188,7 +226,7 @@ onMounted(load)
         <h3>切片结果</h3>
         <el-button type="primary" @click="openCreateDialog">新增题目</el-button>
       </div>
-      <el-table :data="paper.questions || []">
+      <el-table :data="sortedQuestions">
         <el-table-column prop="question_no" label="题号" width="100" />
         <el-table-column prop="question_type" label="题型" width="120" />
         <el-table-column prop="stem_text" label="题干" min-width="380" />
