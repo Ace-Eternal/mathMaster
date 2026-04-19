@@ -27,7 +27,6 @@ const form = reactive({
   title: '',
   year: undefined as number | undefined,
   source: '',
-  subject: 'math',
   grade_level: '',
   region: '',
   term: '',
@@ -54,7 +53,6 @@ const openEdit = (paper: any) => {
   form.title = paper.title || ''
   form.year = paper.year || undefined
   form.source = paper.source || ''
-  form.subject = paper.subject || 'math'
   form.grade_level = paper.grade_level || ''
   form.region = paper.region || ''
   form.term = paper.term || ''
@@ -72,7 +70,6 @@ const savePaper = async () => {
       title: form.title,
       year: form.year,
       source: form.source || null,
-      subject: form.subject,
       grade_level: form.grade_level || null,
       region: form.region || null,
       term: form.term || null,
@@ -226,9 +223,6 @@ onMounted(loadPapers)
         </el-form-item>
         <el-form-item label="来源">
           <el-input v-model="form.source" />
-        </el-form-item>
-        <el-form-item label="科目">
-          <el-input v-model="form.subject" />
         </el-form-item>
         <el-form-item label="年级">
           <el-input v-model="form.grade_level" />

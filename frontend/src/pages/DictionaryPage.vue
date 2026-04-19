@@ -29,7 +29,6 @@ const saveKnowledge = async () => {
     level: knowledgeForm.value.level,
     parent_id: knowledgeForm.value.level === 2 ? knowledgeForm.value.parent_id : null,
     sort_no: knowledgeForm.value.sort_no,
-    subject: 'math',
   }
   if (knowledgeForm.value.id) {
     await api.patch(`/dictionary/knowledge-points/${knowledgeForm.value.id}`, payload)
@@ -66,7 +65,6 @@ const saveMethod = async () => {
   const payload = {
     name: methodForm.value.name,
     description: methodForm.value.description || null,
-    subject: 'math',
   }
   if (methodForm.value.id) {
     await api.patch(`/dictionary/solution-methods/${methodForm.value.id}`, payload)

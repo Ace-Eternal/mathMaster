@@ -1023,7 +1023,6 @@ class PaperPipelineService:
         region: str | None,
         grade_level: str | None,
         term: str | None,
-        subject: str,
     ) -> Paper:
         paper_asset = UploadedAsset(filename=paper_file.filename or "paper.pdf", content=await paper_file.read())
         answer_asset = None
@@ -1037,7 +1036,6 @@ class PaperPipelineService:
             region=region,
             grade_level=grade_level,
             term=term,
-            subject=subject,
         )
 
     async def import_folder_uploads(
@@ -1045,7 +1043,6 @@ class PaperPipelineService:
         *,
         paper_files: list[UploadFile],
         answer_files: list[UploadFile],
-        subject: str,
     ) -> tuple[ImportJob, list[dict[str, Any]]]:
         paper_assets = [UploadedAsset(filename=item.filename or "paper.pdf", content=await item.read()) for item in paper_files]
         answer_assets = [UploadedAsset(filename=item.filename or "answer.pdf", content=await item.read()) for item in answer_files]
@@ -1061,7 +1058,6 @@ class PaperPipelineService:
                 region=None,
                 grade_level=None,
                 term=None,
-                subject=subject,
             )
             imported_items.append(
                 {
@@ -1153,7 +1149,7 @@ class PaperPipelineService:
 
     def update_paper(self, paper_id: int, payload: dict[str, Any]) -> Paper:
         paper = self.get_paper(paper_id)
-        for field in ["title", "year", "source", "subject", "grade_level", "region", "term", "status"]:
+        for field in ["title", "year", "source", "grade_level", "region", "term", "status"]:
             value = payload.get(field)
             if value is not None:
                 setattr(paper, field, value)
@@ -1353,7 +1349,6 @@ class PaperPipelineService:
         region: str | None,
         grade_level: str | None,
         term: str | None,
-        subject: str,
     ) -> Paper:
         paper_meta = self._extract_meta(paper_asset.filename, title)
         paper_key = build_storage_key("raw", "unpaired", "paper", filename=random_prefixed_name(paper_asset.filename))
@@ -1362,7 +1357,6 @@ class PaperPipelineService:
             title=paper_meta["title"],
             year=paper_meta["year"],
             source=source,
-            subject=subject,
             grade_level=grade_level or paper_meta["grade_level"],
             region=region,
             term=term or paper_meta["term"],

@@ -73,7 +73,6 @@ async def upload_paper(
     region: str | None = Form(default=None),
     grade_level: str | None = Form(default=None),
     term: str | None = Form(default=None),
-    subject: str = Form(default="math"),
     db: Session = Depends(get_db),
 ):
     service = get_pipeline_service(db)
@@ -85,7 +84,6 @@ async def upload_paper(
         region=region,
         grade_level=grade_level,
         term=term,
-        subject=subject,
     )
 
 
@@ -93,14 +91,12 @@ async def upload_paper(
 async def import_folders(
     paper_files: list[UploadFile] = File(...),
     answer_files: list[UploadFile] = File(default=[]),
-    subject: str = Form(default="math"),
     db: Session = Depends(get_db),
 ):
     service = get_pipeline_service(db)
     import_job, items = await service.import_folder_uploads(
         paper_files=paper_files,
         answer_files=answer_files,
-        subject=subject,
     )
     return ImportFoldersResponse(
         import_job=ImportJobResponse(

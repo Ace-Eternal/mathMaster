@@ -11,6 +11,7 @@ import DictionaryPage from '../pages/DictionaryPage.vue'
 import SearchPage from '../pages/SearchPage.vue'
 import QuestionDetailPage from '../pages/QuestionDetailPage.vue'
 import SettingsPage from '../pages/SettingsPage.vue'
+import SolutionTemplatePage from '../pages/SolutionTemplatePage.vue'
 
 const router = createRouter({
   history: createWebHistory(),
@@ -28,6 +29,7 @@ const router = createRouter({
         { path: '/review', component: ReviewPage },
         { path: '/review/:questionId', component: ReviewPage, props: true },
         { path: '/dictionary', component: DictionaryPage },
+        { path: '/templates', component: SolutionTemplatePage },
         { path: '/search', component: SearchPage },
         { path: '/questions/:id', component: QuestionDetailPage, props: true },
         { path: '/settings', component: SettingsPage }

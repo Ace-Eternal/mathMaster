@@ -5,9 +5,11 @@ import zipfile
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from app.api.routes import templates as template_routes
 from app.db.base import Base
-from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod
+from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
+from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
@@ -24,6 +26,69 @@ def test_local_storage_round_trip(tmp_path):
     storage.save_file(b"hello", key)
     assert storage.exists(key) is True
     assert storage.read_file(key) == b"hello"
+
+
+def test_solution_template_crud_syncs_markdown_file(tmp_path, monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    monkeypatch.setattr(template_routes, "get_storage_service", lambda: storage)
+
+    with Session(engine) as db:
+        created = template_routes.create_template(
+            SolutionTemplateCreate(
+                name="导数模板",
+                description="适合函数单调性",
+                content="先求导：$f'(x)$",
+                tags="导数,函数",
+            ),
+            db=db,
+        )
+        assert created.template_md_path == f"templates/{created.id}/template.md"
+        assert storage.read_file(created.template_md_path).decode("utf-8") == "先求导：$f'(x)$"
+
+        other = template_routes.create_template(
+            SolutionTemplateCreate(name="几何模板", description="立体几何步骤", content="证明线面垂直", tags="几何"),
+            db=db,
+        )
+        created.updated_at = created.updated_at.replace(year=2025)
+        db.add(created)
+        db.commit()
+
+        matched = template_routes.list_templates(keyword="几何", db=db)
+        assert [item.id for item in matched] == [other.id]
+
+        updated = template_routes.update_template(
+            created.id,
+            SolutionTemplateUpdate(description=None, content="更新后的 $x^2$", tags=None),
+            db=db,
+        )
+        assert updated.description is None
+        assert updated.tags is None
+        assert storage.read_file(updated.template_md_path).decode("utf-8") == "更新后的 $x^2$"
+
+        template_routes.delete_template(created.id, db=db)
+        assert db.get(SolutionTemplate, created.id) is None
+        assert not storage.exists(updated.template_md_path)
+
+
+def test_solution_template_create_rolls_back_when_file_sync_fails(tmp_path, monkeypatch):
+    class FailingStorage(LocalFileStorageService):
+        def save_file(self, file_bytes: bytes, target_key: str) -> str:
+            raise OSError("写入失败")
+
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    monkeypatch.setattr(template_routes, "get_storage_service", lambda: FailingStorage(base_dir=str(tmp_path)))
+
+    with Session(engine) as db:
+        try:
+            template_routes.create_template(SolutionTemplateCreate(name="失败模板", content="内容"), db=db)
+        except Exception as exc:  # noqa: BLE001
+            assert getattr(exc, "status_code", None) == 500
+        else:
+            raise AssertionError("文件同步失败时应返回 500")
+        assert db.execute(select(SolutionTemplate)).scalar_one_or_none() is None
 
 
 def test_slice_service_uses_json_blocks_first():
@@ -282,7 +347,7 @@ def test_paper_pipeline_service_sorts_questions_by_question_no(tmp_path):
     storage = LocalFileStorageService(base_dir=str(tmp_path))
 
     with Session(engine) as db:
-        paper = Paper(title="排序测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="排序测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         db.add_all(
@@ -310,7 +375,7 @@ def test_analysis_service_creates_analysis_and_missing_dictionaries():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="1", stem_text="已知函数f(x)=x^2，求最值。", review_status="APPROVED")
@@ -322,7 +387,7 @@ def test_analysis_service_creates_analysis_and_missing_dictionaries():
         class StubGateway:
             def structured_output(self, *, scenario, model=None, payload=None):
                 assert scenario == "analysis"
-                assert sorted(payload.keys()) == ["answer_text", "question_type", "stem_text", "subject"]
+                assert sorted(payload.keys()) == ["answer_text", "question_type", "stem_text"]
                 return {
                     "major_knowledge_points": ["函数与导数"],
                     "minor_knowledge_points": ["二次函数最值"],
@@ -349,7 +414,7 @@ def test_analysis_service_normalizes_generic_knowledge_points_and_long_method_se
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="统计试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="统计试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="15", stem_text="根据频率分布直方图估计平均数。", review_status="APPROVED")
@@ -382,7 +447,7 @@ def test_analysis_service_infers_knowledge_points_from_packy_solution_schema():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="概率试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="概率试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(
@@ -444,7 +509,7 @@ def test_analysis_service_sanitizes_internal_notice_before_storage():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="概率试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="概率试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="1", stem_text="判断互斥事件。", review_status="APPROVED")
@@ -474,7 +539,7 @@ def test_analysis_service_rejects_dictionary_echo_results():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="1", stem_text="求函数最值。", review_status="APPROVED")
@@ -531,15 +596,15 @@ def test_review_service_build_question_detail_response_handles_analysis_links(tm
     Base.metadata.create_all(engine)
     storage = LocalFileStorageService(base_dir=str(tmp_path))
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="36", stem_text="题干", review_status="PENDING")
         db.add(question)
         db.flush()
         analysis = QuestionAnalysis(question_id=question.id, analysis_json='{"ok":true}', explanation_md="讲解")
-        kp = KnowledgePoint(name="函数与导数", level=1, subject="math", sort_no=1)
-        method = SolutionMethod(name="分类讨论", subject="math")
+        kp = KnowledgePoint(name="函数与导数", level=1, sort_no=1)
+        method = SolutionMethod(name="分类讨论")
         db.add_all([analysis, kp, method])
         db.flush()
         db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
@@ -558,7 +623,7 @@ def test_review_service_create_update_delete_question_syncs_slice_files_and_rela
     Base.metadata.create_all(engine)
     storage = LocalFileStorageService(base_dir=str(tmp_path))
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.commit()
         service = ReviewService(db, storage)
@@ -603,8 +668,8 @@ def test_review_service_create_update_delete_question_syncs_slice_files_and_rela
         analysis = QuestionAnalysis(question_id=updated.id, analysis_json="{}", explanation_md="分析")
         db.add(analysis)
         db.flush()
-        kp = KnowledgePoint(name="空间几何", level=1, subject="math", sort_no=1)
-        method = SolutionMethod(name="空间向量法", subject="math")
+        kp = KnowledgePoint(name="空间几何", level=1, sort_no=1)
+        method = SolutionMethod(name="空间向量法")
         db.add_all([kp, method])
         db.flush()
         db.add(QuestionKnowledge(question_id=updated.id, knowledge_point_id=kp.id, source_type="AUTO"))
@@ -634,11 +699,11 @@ def test_search_service_filters_questions_by_manual_tags():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
-        knowledge = KnowledgePoint(name="概率与统计", level=1, subject="math", sort_no=1)
-        method = SolutionMethod(name="概率计算", subject="math")
+        knowledge = KnowledgePoint(name="概率与统计", level=1, sort_no=1)
+        method = SolutionMethod(name="概率计算")
         db.add_all([knowledge, method])
         db.flush()
         question = Question(paper_id=paper.id, question_no="1", stem_text="概率题", review_status="APPROVED")
@@ -666,14 +731,14 @@ def test_dictionary_delete_cleans_question_links():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="1", stem_text="题干", review_status="APPROVED")
         db.add(question)
         db.flush()
-        knowledge = KnowledgePoint(name="函数与导数", level=1, subject="math", sort_no=1)
-        method = SolutionMethod(name="分类讨论", subject="math")
+        knowledge = KnowledgePoint(name="函数与导数", level=1, sort_no=1)
+        method = SolutionMethod(name="分类讨论")
         db.add_all([knowledge, method])
         db.flush()
         db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=knowledge.id, source_type="MANUAL"))
@@ -698,7 +763,7 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
     storage.save_file(b"\x89PNG\r\n\x1a\n", "mineu/1/images/demo.png")
 
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(
@@ -734,7 +799,7 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
     storage = LocalFileStorageService(base_dir=str(tmp_path))
 
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="2", stem_text="求概率。", review_status="APPROVED")
@@ -773,7 +838,7 @@ def test_chat_tutor_service_cancel_generation_preserves_partial_message(tmp_path
     storage = LocalFileStorageService(base_dir=str(tmp_path))
 
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="3", stem_text="求导。", review_status="APPROVED")
@@ -820,7 +885,7 @@ def test_chat_tutor_service_lists_sessions_with_latest_first():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="8", stem_text="题干", review_status="APPROVED")
@@ -842,7 +907,7 @@ def test_chat_tutor_service_get_session_validates_question():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
-        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
         db.add(paper)
         db.flush()
         question = Question(paper_id=paper.id, question_no="9", stem_text="题干", review_status="APPROVED")

@@ -13,14 +13,12 @@ class PaperCreateRequest(BaseModel):
     grade_level: str | None = None
     region: str | None = None
     term: str | None = None
-    subject: str = "math"
 
 
 class PaperUpdateRequest(BaseModel):
     title: str | None = None
     year: int | None = None
     source: str | None = None
-    subject: str | None = None
     grade_level: str | None = None
     region: str | None = None
     term: str | None = None
@@ -65,7 +63,6 @@ class PaperResponse(TimestampedResponse):
     title: str
     year: int | None = None
     source: str | None = None
-    subject: str
     grade_level: str | None = None
     region: str | None = None
     term: str | None = None

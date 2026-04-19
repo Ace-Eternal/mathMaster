@@ -26,7 +26,6 @@ class KnowledgeAnalysisService:
                 "stem_text": question.stem_text,
                 "answer_text": question.answer.answer_text if question.answer else None,
                 "question_type": question.question_type,
-                "subject": question.paper.subject if question.paper else "math",
             },
         )
         result = self._normalize_analysis_result(result=result, question=question)
@@ -45,13 +44,13 @@ class KnowledgeAnalysisService:
         self.db.query(QuestionMethod).filter(QuestionMethod.question_id == question.id).delete()
 
         for name in stored_result.get("major_knowledge_points", []):
-            kp = self._get_or_create_knowledge_point(name=name, level=1, subject=question.paper.subject if question.paper else "math")
+            kp = self._get_or_create_knowledge_point(name=name, level=1)
             self.db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
         for name in stored_result.get("minor_knowledge_points", []):
-            kp = self._get_or_create_knowledge_point(name=name, level=2, subject=question.paper.subject if question.paper else "math")
+            kp = self._get_or_create_knowledge_point(name=name, level=2)
             self.db.add(QuestionKnowledge(question_id=question.id, knowledge_point_id=kp.id, source_type="AUTO"))
         for name in stored_result.get("solution_methods", []):
-            method = self._get_or_create_solution_method(name=name, subject=question.paper.subject if question.paper else "math")
+            method = self._get_or_create_solution_method(name=name)
             self.db.add(QuestionMethod(question_id=question.id, solution_method_id=method.id, source_type="AUTO"))
 
         self.db.commit()
@@ -276,7 +275,7 @@ class KnowledgeAnalysisService:
         except (TypeError, ValueError):
             return 0.75
 
-    def _get_or_create_knowledge_point(self, *, name: str, level: int, subject: str) -> KnowledgePoint:
+    def _get_or_create_knowledge_point(self, *, name: str, level: int) -> KnowledgePoint:
         normalized_name = str(name or "").strip()
         if not normalized_name:
             raise ValueError("知识点名称不能为空")
@@ -284,26 +283,22 @@ class KnowledgeAnalysisService:
         if existing is not None:
             if existing.level != level and level < existing.level:
                 existing.level = level
-            if not existing.subject:
-                existing.subject = subject
             return existing
         sort_no = self.db.execute(select(KnowledgePoint).where(KnowledgePoint.level == level).order_by(KnowledgePoint.sort_no.desc())).scalars().first()
         next_sort = (sort_no.sort_no + 1) if sort_no else 1
-        knowledge_point = KnowledgePoint(name=normalized_name, level=level, subject=subject, sort_no=next_sort)
+        knowledge_point = KnowledgePoint(name=normalized_name, level=level, sort_no=next_sort)
         self.db.add(knowledge_point)
         self.db.flush()
         return knowledge_point
 
-    def _get_or_create_solution_method(self, *, name: str, subject: str) -> SolutionMethod:
+    def _get_or_create_solution_method(self, *, name: str) -> SolutionMethod:
         normalized_name = str(name or "").strip()
         if not normalized_name:
             raise ValueError("解法名称不能为空")
         existing = self.db.execute(select(SolutionMethod).where(SolutionMethod.name == normalized_name)).scalar_one_or_none()
         if existing is not None:
-            if not existing.subject:
-                existing.subject = subject
             return existing
-        method = SolutionMethod(name=normalized_name, subject=subject)
+        method = SolutionMethod(name=normalized_name)
         self.db.add(method)
         self.db.flush()
         return method

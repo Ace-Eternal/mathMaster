@@ -33,7 +33,6 @@ class Paper(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(255), nullable=False)
     year: Mapped[int | None] = mapped_column(Integer)
     source: Mapped[str | None] = mapped_column(String(255))
-    subject: Mapped[str] = mapped_column(String(64), default="math", nullable=False)
     grade_level: Mapped[str | None] = mapped_column(String(64))
     region: Mapped[str | None] = mapped_column(String(64))
     term: Mapped[str | None] = mapped_column(String(64))
@@ -160,7 +159,6 @@ class KnowledgePoint(TimestampMixin, Base):
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     parent_id: Mapped[int | None] = mapped_column(ForeignKey("knowledge_point.id"))
     level: Mapped[int] = mapped_column(Integer, nullable=False)
-    subject: Mapped[str] = mapped_column(String(64), default="math", nullable=False)
     sort_no: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
     parent: Mapped["KnowledgePoint | None"] = relationship(remote_side=[id])
@@ -174,8 +172,6 @@ class SolutionMethod(TimestampMixin, Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
     description: Mapped[str | None] = mapped_column(Text)
-    subject: Mapped[str] = mapped_column(String(64), default="math", nullable=False)
-
     question_links: Mapped[list["QuestionMethod"]] = relationship(back_populates="solution_method")
 
 
@@ -256,3 +252,15 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
+
+
+class SolutionTemplate(TimestampMixin, Base):
+    __tablename__ = "solution_template"
+    __table_args__ = (Index("ix_solution_template_name", "name"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+    content: Mapped[str] = mapped_column(Text, nullable=False, default="")
+    tags: Mapped[str | None] = mapped_column(String(512))
+    template_md_path: Mapped[str | None] = mapped_column(String(1024))

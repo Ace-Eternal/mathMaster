@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import analysis, chat, dictionary, files, papers, questions, review, search, settings as settings_routes
+from app.api.routes import analysis, chat, dictionary, files, papers, questions, review, search, settings as settings_routes, templates
 from app.core.config import settings
 from app.db.init_db import init_db
 
@@ -44,3 +44,4 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(search.router, prefix="/api/search", tags=["search"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
+app.include_router(templates.router, prefix="/api/templates", tags=["templates"])

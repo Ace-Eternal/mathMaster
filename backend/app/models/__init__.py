@@ -13,6 +13,7 @@ from app.models.paper import (
     QuestionMethod,
     ReviewRecord,
     SolutionMethod,
+    SolutionTemplate,
 )
 
 __all__ = [
@@ -25,6 +26,7 @@ __all__ = [
     "ReviewRecord",
     "KnowledgePoint",
     "SolutionMethod",
+    "SolutionTemplate",
     "QuestionKnowledge",
     "QuestionMethod",
     "QuestionAnalysis",

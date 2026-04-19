@@ -19,6 +19,7 @@ def ensure_data_dirs() -> None:
         "slices",
         "review",
         "analysis",
+        "templates",
     ]:
         (base_dir / relative).mkdir(parents=True, exist_ok=True)
 
