@@ -32,6 +32,26 @@ PREAMBLE_PATTERN = re.compile(
 )
 
 
+def question_no_sort_key(question_no: str | None) -> tuple[int, tuple[object, ...]]:
+    if not question_no:
+        return (1, ("",))
+    normalized = str(question_no).strip()
+    if not normalized:
+        return (1, ("",))
+    parts = re.split(r"(\d+)", normalized)
+    natural_parts: list[object] = []
+    has_digit = False
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            natural_parts.append(int(part))
+            has_digit = True
+        else:
+            natural_parts.append(part)
+    return (0 if has_digit else 1, tuple(natural_parts or [normalized]))
+
+
 @dataclass
 class UploadedAsset:
     filename: str
@@ -1636,6 +1656,10 @@ class PaperPipelineService:
 
     def _decorate_papers(self, papers: list[Paper]) -> None:
         for paper in papers:
+            paper.questions = sorted(
+                paper.questions,
+                key=lambda question: (question_no_sort_key(question.question_no), question.id),
+            )
             setattr(paper, "pending_review_count", sum(1 for question in paper.questions if question.review_status == "PENDING"))
             latest_error = next((job.error_message for job in reversed(paper.conversion_jobs) if job.error_message), None)
             setattr(paper, "latest_error_message", latest_error)

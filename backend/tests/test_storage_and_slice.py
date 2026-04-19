@@ -11,7 +11,7 @@ from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
-from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, SliceService, normalize_pair_key
+from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key
 from app.services.chat import ChatTutorService
 from app.services.review import ReviewService
 from app.services.search import SearchService
@@ -274,6 +274,36 @@ def test_build_answer_slices_prefers_llm_text_for_text_only_candidates():
     assert [draft.answer_question_no for draft in drafts] == ["12", "13"]
     assert drafts[0].stem_text == "(1,0)"
     assert drafts[1].stem_text == "0.26"
+
+
+def test_paper_pipeline_service_sorts_questions_by_question_no(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+
+    with Session(engine) as db:
+        paper = Paper(title="排序测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        db.add_all(
+            [
+                Question(paper_id=paper.id, question_no="10", stem_text="第十题", review_status="APPROVED"),
+                Question(paper_id=paper.id, question_no="2", stem_text="第二题", review_status="PENDING"),
+                Question(paper_id=paper.id, question_no="1", stem_text="第一题", review_status="APPROVED"),
+            ]
+        )
+        db.commit()
+
+        service = PaperPipelineService(
+            db=db,
+            storage=storage,
+            mineu_service=MineuService(),
+            slice_service=SliceService(),
+            match_service=MatchService(LLMGateway()),
+        )
+        loaded = service.get_paper(paper.id)
+
+        assert [item.question_no for item in loaded.questions] == ["1", "2", "10"]
 
 
 def test_analysis_service_creates_analysis_and_missing_dictionaries():
