@@ -12,7 +12,7 @@ from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key
-from app.services.chat import ChatTutorService
+from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
@@ -744,7 +744,7 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
         db.commit()
 
         class StubGateway:
-            def stream_chat(self, *, system_prompt, messages, model=None):
+            def stream_chat(self, *, system_prompt, messages, model=None, should_stop=None):
                 yield {"type": "start", "model_name": "stub-model"}
                 yield {"type": "chunk", "content": "第一步。"}
                 yield {"type": "chunk", "content": "第二步。"}
@@ -759,10 +759,61 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
         events = list(event_iter)
         assert session_id > 0
         assert events[0]["type"] == "meta"
+        assert events[0]["generation_id"]
         assert events[-1]["type"] == "done"
+        assert events[-1]["finish_reason"] == "completed"
         messages = list(db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)).scalars())
         assert messages[-1].role == "assistant"
         assert messages[-1].content == "第一步。第二步。"
+
+
+def test_chat_tutor_service_cancel_generation_preserves_partial_message(tmp_path, monkeypatch):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", subject="math", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="3", stem_text="求导。", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="略", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def stream_chat(self, *, system_prompt, messages, model=None, should_stop=None):
+                yield {"type": "start", "model_name": "stub-model"}
+                yield {"type": "chunk", "content": "第一段。"}
+                if should_stop and should_stop():
+                    return
+                yield {"type": "chunk", "content": "第二段。"}
+
+        monkeypatch.setattr("app.services.chat.get_storage_service", lambda: storage)
+        service = ChatTutorService(db, StubGateway())
+        session_id, event_iter = service.stream_send(
+            question_id=question.id,
+            content="请讲解",
+            session_id=None,
+            user_id="stopper",
+        )
+        first_event = next(event_iter)
+        assert first_event["type"] == "meta"
+        start_event = next(event_iter)
+        assert start_event["type"] == "start"
+        first_chunk = next(event_iter)
+        assert first_chunk["type"] == "chunk"
+        assert first_chunk["content"] == "第一段。"
+        cancel_result = service.cancel_generation(first_event["generation_id"])
+        assert cancel_result["status"] == "cancelled"
+        remaining_events = list(event_iter)
+        assert remaining_events[-1]["type"] == "done"
+        assert remaining_events[-1]["finish_reason"] == "stopped"
+        messages = list(db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)).scalars())
+        assert messages[-1].content.endswith("> 已停止生成")
+        assert "第一段。" in messages[-1].content
+        assert chat_generation_registry.cancel(first_event["generation_id"]) == "already_finished"
 
 
 def test_chat_tutor_service_lists_sessions_with_latest_first():

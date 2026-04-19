@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api/client'
 import MarkdownContent from '../components/MarkdownContent.vue'
@@ -15,13 +15,27 @@ const savingTags = ref(false)
 const sendingMessage = ref(false)
 const activePanels = ref(['chat'])
 const chatScrollRef = ref<HTMLElement | null>(null)
+const streamController = ref<AbortController | null>(null)
+const streamState = ref<'idle' | 'streaming' | 'stopping'>('idle')
+const activeGenerationId = ref<string | null>(null)
+const activeAssistantMessage = ref<any>(null)
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'
+const STOP_NOTICE = '\n\n> 已停止生成'
 
 const questionImages = computed(() => detail.value?.assets?.question_images || [])
 const answerImages = computed(() => detail.value?.assets?.answer_images || [])
 const knowledges = computed(() => detail.value?.knowledges || [])
 const methods = computed(() => detail.value?.methods || [])
 const activeSessionId = computed(() => session.value?.id ?? null)
+const isStreaming = computed(() => streamState.value === 'streaming')
+const isStopping = computed(() => streamState.value === 'stopping')
+const showStopAction = computed(() => streamState.value !== 'idle')
+const composerButtonDisabled = computed(() => {
+  if (isStopping.value) return true
+  if (isStreaming.value) return false
+  return !message.value.trim()
+})
+const composerButtonLabel = computed(() => (isStreaming.value ? '停止生成' : '发送消息'))
 
 const load = async () => {
   detail.value = (await api.get(`/questions/${props.id}`)).data
@@ -55,13 +69,19 @@ const loadChatSessions = async () => {
   }
 }
 
-const selectSession = async (sessionId: number) => {
+const loadSession = async (sessionId: number) => {
   session.value = (await api.get(`/chat/sessions/${sessionId}`, { params: { question_id: Number(props.id) } })).data
   activePanels.value = ['chat']
   await scrollChatToBottom()
 }
 
+const selectSession = async (sessionId: number) => {
+  if (streamState.value !== 'idle') return
+  await loadSession(sessionId)
+}
+
 const createNewSession = () => {
+  if (streamState.value !== 'idle') return
   session.value = null
   message.value = ''
 }
@@ -91,17 +111,68 @@ const parseSseBlock = (block: string) => {
   }
 }
 
+const appendStopNotice = (target: { content?: string | null } | null) => {
+  if (!target) return
+  const content = String(target.content || '').trimEnd()
+  if (content.includes(STOP_NOTICE.trim())) return
+  target.content = content ? `${content}${STOP_NOTICE}` : STOP_NOTICE.trim()
+}
+
+const refreshCurrentSession = async (sessionId: number | null | undefined) => {
+  if (!sessionId) return
+  await new Promise((resolve) => window.setTimeout(resolve, 250))
+  await loadChatSessions()
+  if (activeSessionId.value === sessionId || session.value?.id === sessionId) {
+    await loadSession(sessionId)
+  }
+}
+
+const stopMessage = async () => {
+  if (streamState.value !== 'streaming') return
+  streamState.value = 'stopping'
+  const generationId = activeGenerationId.value
+  const currentSessionId = session.value?.id
+  streamController.value?.abort()
+  appendStopNotice(activeAssistantMessage.value)
+  if (generationId) {
+    try {
+      await api.post(`/chat/generations/${generationId}/cancel`)
+    } catch {
+      // 取消接口失败时保持本地已停止状态，不额外打断交互
+    }
+  }
+  await refreshCurrentSession(currentSessionId)
+}
+
+const handleComposerKeydown = async (event: KeyboardEvent) => {
+  if (event.key !== 'Enter' || event.shiftKey) return
+  event.preventDefault()
+  if (streamState.value === 'idle') {
+    await sendMessage()
+  }
+}
+
 const sendMessage = async () => {
   const content = message.value.trim()
-  if (!content || sendingMessage.value) return
+  if (!content || sendingMessage.value || streamState.value !== 'idle') return
 
   sendingMessage.value = true
+  streamState.value = 'streaming'
+  activeGenerationId.value = null
   activePanels.value = ['chat']
   if (!session.value) {
     session.value = { id: null, question_id: Number(props.id), messages: [] }
   }
-  const userMessage = { id: `user-${Date.now()}`, role: 'user', content }
-  const assistantMessage = { id: `assistant-${Date.now()}`, role: 'assistant', content: '', model_name: null as string | null }
+  const streamAbortController = new AbortController()
+  streamController.value = streamAbortController
+  const userMessage = reactive({ id: `user-${Date.now()}`, role: 'user', content })
+  const assistantMessage = reactive({
+    id: `assistant-${Date.now()}`,
+    role: 'assistant',
+    content: '',
+    model_name: null as string | null,
+  })
+  activeAssistantMessage.value = assistantMessage
   session.value.messages = [...(session.value.messages || []), userMessage, assistantMessage]
   message.value = ''
   await scrollChatToBottom()
@@ -115,6 +186,7 @@ const sendMessage = async () => {
         question_id: Number(props.id),
         content,
       }),
+      signal: streamAbortController.signal,
     })
     if (!response.ok || !response.body) {
       throw new Error(`请求失败：${response.status}`)
@@ -133,6 +205,7 @@ const sendMessage = async () => {
         if (!event) continue
         if (event.type === 'meta') {
           session.value.id = event.session_id
+          activeGenerationId.value = event.generation_id || null
           await loadChatSessions()
           continue
         }
@@ -150,6 +223,9 @@ const sendMessage = async () => {
         }
         if (event.type === 'done') {
           if (event.session_id) session.value.id = event.session_id
+          if (event.finish_reason === 'stopped') {
+            appendStopNotice(assistantMessage)
+          }
           await loadChatSessions()
           continue
         }
@@ -160,9 +236,17 @@ const sendMessage = async () => {
       }
     }
   } catch (error: any) {
-    assistantMessage.content = assistantMessage.content || '对话生成失败。'
-    ElMessage.error(error?.message || '对话生成失败')
+    if (error?.name === 'AbortError' && isStopping.value) {
+      appendStopNotice(assistantMessage)
+    } else {
+      assistantMessage.content = assistantMessage.content || '对话生成失败。'
+      ElMessage.error(error?.message || '对话生成失败')
+    }
   } finally {
+    streamController.value = null
+    activeGenerationId.value = null
+    activeAssistantMessage.value = null
+    streamState.value = 'idle'
     sendingMessage.value = false
     await scrollChatToBottom()
   }
@@ -189,6 +273,10 @@ const saveTags = async () => {
 
 onMounted(async () => {
   await Promise.all([load(), loadDictionary(), loadChatSessions()])
+})
+
+onBeforeUnmount(() => {
+  streamController.value?.abort()
 })
 </script>
 
@@ -288,64 +376,125 @@ onMounted(async () => {
       </section>
     </div>
 
-    <section class="panel">
-      <el-collapse v-model="activePanels">
-        <el-collapse-item name="chat">
-          <template #title>
-            <div class="chat-header">
-              <span>讲题对话</span>
-              <span class="muted">{{ sendingMessage ? '正在生成中...' : '展开后可在独立面板中滚动查看' }}</span>
-            </div>
-          </template>
-          <div class="chat-layout">
-            <aside class="chat-sidebar">
-              <div class="chat-sidebar-head">
-                <div class="chat-sidebar-title">会话列表</div>
-                <el-button text type="primary" @click.stop="createNewSession">新对话</el-button>
-              </div>
-              <div v-if="chatSessions.length" class="chat-session-list">
-                <button
-                  v-for="item in chatSessions"
-                  :key="item.id"
-                  type="button"
-                  class="chat-session-item"
-                  :class="{ active: activeSessionId === item.id }"
-                  @click="selectSession(item.id)"
-                >
-                  <div class="chat-session-title">{{ item.title || `会话 ${item.id}` }}</div>
-                  <div class="chat-session-preview">{{ item.last_message_preview || '暂无消息摘要' }}</div>
-                  <div class="chat-session-meta">
-                    <span>{{ item.message_count }} 条消息</span>
-                    <span>{{ new Date(item.updated_at || item.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
-                  </div>
-                </button>
-              </div>
-              <div v-else class="muted">还没有历史会话，发送第一条消息后会自动保存。</div>
-            </aside>
+    <section class="chat-shell">
+      <aside class="chat-sidebar">
+        <div class="chat-sidebar-head">
+          <div>
+            <div class="chat-sidebar-title">讲题对话</div>
+            <div class="chat-sidebar-subtitle">像 ChatGPT 一样连续追问、切换历史与继续追问。</div>
+          </div>
+          <el-button text type="primary" @click.stop="createNewSession">新对话</el-button>
+        </div>
 
-            <div class="chat-main">
-              <div ref="chatScrollRef" class="chat-scroll">
-                <div v-if="session?.messages?.length" class="chat-thread">
-                  <div
-                    v-for="item in session.messages"
-                    :key="item.id"
-                    class="chat-row"
-                    :class="item.role === 'user' ? 'chat-row-user' : 'chat-row-assistant'"
-                  >
-                    <div class="chat-bubble" :class="item.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant'">
-                      <div class="chat-role">{{ item.role === 'user' ? '我' : '讲题助手' }}</div>
-                      <MarkdownContent :content="item.content" />
-                    </div>
-                  </div>
-                </div>
-                <div v-else class="muted">当前是新对话，发送消息后会自动保存并出现在左侧会话栏。</div>
-              </div>
-              <el-input v-model="message" type="textarea" :rows="4" placeholder="例如：请按步骤讲解这道题，并解释图中的关键关系。" />
-              <el-button type="primary" :loading="sendingMessage" style="margin-top: 12px" @click="sendMessage">发送</el-button>
+        <div class="chat-sidebar-summary">
+          <div class="chat-sidebar-summary__label">当前题目</div>
+          <div class="chat-sidebar-summary__value">第 {{ detail.question_no }} 题</div>
+          <div class="chat-sidebar-summary__meta">
+            {{ sendingMessage ? '正在生成回答' : `${chatSessions.length} 个历史会话` }}
+          </div>
+        </div>
+
+        <div v-if="chatSessions.length" class="chat-session-list">
+          <button
+            v-for="item in chatSessions"
+            :key="item.id"
+            type="button"
+            class="chat-session-item"
+            :class="{ active: activeSessionId === item.id }"
+            @click="selectSession(item.id)"
+          >
+            <div class="chat-session-title">{{ item.title || `会话 ${item.id}` }}</div>
+            <div class="chat-session-preview">{{ item.last_message_preview || '暂无消息摘要' }}</div>
+            <div class="chat-session-meta">
+              <span>{{ item.message_count }} 条消息</span>
+              <span>{{ new Date(item.updated_at || item.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
+            </div>
+          </button>
+        </div>
+        <div v-else class="chat-sidebar-empty">
+          <div class="chat-sidebar-empty__title">还没有历史会话</div>
+          <div class="muted">发送第一条消息后，会自动保存在这里，方便继续追问。</div>
+        </div>
+      </aside>
+
+      <div class="chat-main">
+        <div class="chat-main__header">
+          <div>
+            <div class="chat-main__title">MathMaster Tutor</div>
+            <div class="chat-main__subtitle">
+              {{ sendingMessage ? '正在流式生成讲解，你可以随时停止。' : '围绕当前题目继续提问，系统会直接结合题干、答案和图片上下文回答。' }}
             </div>
           </div>
-        </el-collapse-item>
-      </el-collapse>
+        </div>
+
+        <div ref="chatScrollRef" class="chat-scroll">
+          <div v-if="session?.messages?.length" class="chat-thread">
+            <div
+              v-for="item in session.messages"
+              :key="item.id"
+              class="chat-turn"
+              :class="item.role === 'user' ? 'chat-turn-user' : 'chat-turn-assistant'"
+            >
+              <div class="chat-avatar" :class="item.role === 'user' ? 'chat-avatar-user' : 'chat-avatar-assistant'">
+                <span v-if="item.role === 'user'">我</span>
+                <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M12 3 4.5 7v5.5c0 4.1 2.8 7.9 7.5 8.5 4.7-.6 7.5-4.4 7.5-8.5V7L12 3Z" />
+                  <path d="M9.5 12.5 11 14l3.8-4.3" />
+                </svg>
+              </div>
+
+              <div class="chat-turn__body">
+                <div class="chat-turn__meta">
+                  <span class="chat-turn__author">{{ item.role === 'user' ? '你' : '讲题助手' }}</span>
+                  <span v-if="item.model_name && item.role !== 'user'" class="chat-turn__model">{{ item.model_name }}</span>
+                </div>
+                <div class="chat-bubble" :class="item.role === 'user' ? 'chat-bubble-user' : 'chat-bubble-assistant'">
+                  <MarkdownContent :content="item.content" />
+                </div>
+              </div>
+            </div>
+          </div>
+          <div v-else class="chat-empty">
+            <div class="chat-empty__badge">New chat</div>
+            <div class="chat-empty__title">从当前题目开始追问</div>
+            <div class="chat-empty__text">例如：先讲思路，再讲每个选项为什么对或错；或者只解释图中的关键空间关系。</div>
+          </div>
+        </div>
+
+        <div class="chat-composer-wrap">
+          <div class="chat-composer-hint">
+            <span>{{ showStopAction ? '点击右侧停止按钮可中断本次回答' : 'Enter 发送，Shift + Enter 换行' }}</span>
+          </div>
+          <div class="chat-composer">
+            <el-input
+              v-model="message"
+              class="chat-composer__input"
+              type="textarea"
+              :rows="4"
+              resize="none"
+              placeholder="给这道题继续提问，例如：先讲总思路，再分步骤解释。"
+              @keydown="handleComposerKeydown"
+            />
+            <button
+              type="button"
+              class="chat-composer__action"
+              :class="{ 'is-stop': showStopAction, 'is-busy': isStopping }"
+              :disabled="composerButtonDisabled"
+              :aria-label="composerButtonLabel"
+              :title="composerButtonLabel"
+              @click="showStopAction ? stopMessage() : sendMessage()"
+            >
+              <svg v-if="showStopAction" viewBox="0 0 24 24" aria-hidden="true">
+                <rect x="7" y="7" width="10" height="10" rx="2.5" />
+              </svg>
+              <svg v-else viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M4 11.5 19.2 4.8c.8-.35 1.58.42 1.23 1.22L13.7 21.2c-.37.83-1.58.74-1.82-.14l-1.55-5.55a1 1 0 0 0-.68-.68L4.14 13.28c-.88-.25-.97-1.46-.14-1.82Z" />
+                <path d="m9.5 14.5 5.5-5.5" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
     </section>
   </div>
 </template>
@@ -410,74 +559,127 @@ onMounted(async () => {
   border-top: 1px solid rgba(15, 23, 42, 0.08);
 }
 
-.chat-header {
-  display: flex;
-  justify-content: space-between;
-  width: 100%;
-  padding-right: 12px;
-}
-
-.chat-scroll {
-  min-height: 240px;
-  max-height: 520px;
-  overflow-y: auto;
-  padding-right: 8px;
-  margin-bottom: 16px;
-}
-
-.chat-layout {
+.chat-shell {
   display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 18px;
+  grid-template-columns: 290px minmax(0, 1fr);
+  min-height: 820px;
+  border: 1px solid rgba(15, 23, 42, 0.08);
+  border-radius: 28px;
+  overflow: hidden;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(250, 251, 253, 0.96)),
+    radial-gradient(circle at top, rgba(59, 130, 246, 0.06), transparent 35%);
+  box-shadow: 0 30px 80px rgba(15, 23, 42, 0.08);
 }
 
 .chat-sidebar {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
-  padding-right: 6px;
+  padding: 20px;
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(243, 246, 251, 0.92)),
+    radial-gradient(circle at top left, rgba(59, 130, 246, 0.08), transparent 38%);
   border-right: 1px solid rgba(15, 23, 42, 0.08);
 }
 
 .chat-sidebar-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 12px;
 }
 
 .chat-sidebar-title {
-  font-size: 14px;
-  font-weight: 700;
-  color: var(--mm-text);
+  font-size: 18px;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: #0f172a;
+}
+
+.chat-sidebar-subtitle {
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.chat-sidebar-summary {
+  padding: 16px;
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.82);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.chat-sidebar-summary__label {
+  color: #64748b;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.chat-sidebar-summary__value {
+  margin-top: 8px;
+  font-size: 20px;
+  font-weight: 800;
+  color: #0f172a;
+}
+
+.chat-sidebar-summary__meta {
+  margin-top: 8px;
+  color: #475569;
+  font-size: 12px;
 }
 
 .chat-session-list {
   display: grid;
   gap: 10px;
-  max-height: 520px;
+  flex: 1;
   overflow-y: auto;
-  padding-right: 6px;
+  padding-right: 4px;
+}
+
+.chat-sidebar-empty {
+  padding: 18px 16px;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.72);
+  border: 1px dashed rgba(148, 163, 184, 0.3);
+}
+
+.chat-sidebar-empty__title {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 700;
+  color: #0f172a;
 }
 
 .chat-session-item {
   width: 100%;
-  border: 1px solid rgba(15, 23, 42, 0.08);
-  border-radius: 14px;
-  padding: 12px;
-  background: #fff;
+  border: 1px solid transparent;
+  border-radius: 18px;
+  padding: 14px;
+  background: rgba(255, 255, 255, 0.74);
   text-align: left;
   cursor: pointer;
+  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.chat-session-item:hover {
+  transform: translateY(-1px);
+  border-color: rgba(96, 165, 250, 0.26);
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 14px 32px rgba(15, 23, 42, 0.07);
 }
 
 .chat-session-item.active {
   border-color: rgba(59, 130, 246, 0.35);
-  background: #eff6ff;
+  background: linear-gradient(180deg, rgba(239, 246, 255, 0.96), rgba(226, 240, 255, 0.9));
+  box-shadow: 0 16px 34px rgba(37, 99, 235, 0.12);
 }
 
 .chat-session-title {
-  color: var(--mm-text);
+  color: #0f172a;
   font-size: 14px;
   font-weight: 700;
   line-height: 1.4;
@@ -499,65 +701,286 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 10px;
   margin-top: 8px;
-  color: var(--mm-text-soft);
+  color: #64748b;
   font-size: 12px;
 }
 
 .chat-main {
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(249, 250, 251, 0.96)),
+    radial-gradient(circle at top, rgba(255, 255, 255, 0.96), transparent 45%);
+}
+
+.chat-main__header {
+  padding: 28px 32px 16px;
+}
+
+.chat-main__title {
+  font-size: 22px;
+  font-weight: 800;
+  letter-spacing: -0.03em;
+  color: #111827;
+}
+
+.chat-main__subtitle {
+  margin-top: 8px;
+  max-width: 720px;
+  color: #6b7280;
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+.chat-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 8px 0 0;
+}
+
+.chat-composer {
+  position: relative;
+}
+
+.chat-composer__input :deep(.el-textarea__inner) {
+  min-height: 118px;
+  padding-right: 80px;
+  padding-left: 18px;
+  padding-top: 16px;
+  padding-bottom: 16px;
+  border-radius: 26px;
+  background: rgba(255, 255, 255, 0.96) !important;
+  box-shadow:
+    0 0 0 1px rgba(148, 163, 184, 0.18) inset !important,
+    0 22px 50px rgba(15, 23, 42, 0.08) !important;
+}
+
+.chat-composer__action {
+  position: absolute;
+  top: 50%;
+  right: 18px;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+  border: none;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(135deg, #2563eb, #1d4ed8);
+  color: #fff;
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.28);
+  cursor: pointer;
+  transition: transform 0.2s ease, box-shadow 0.2s ease, background 0.2s ease, opacity 0.2s ease;
+}
+
+.chat-composer__action:hover:not(:disabled) {
+  transform: translateY(-50%) scale(1.03);
+  box-shadow: 0 12px 30px rgba(37, 99, 235, 0.34);
+}
+
+.chat-composer__action:disabled {
+  opacity: 0.48;
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.chat-composer__action.is-stop {
+  background: linear-gradient(135deg, #ef4444, #dc2626);
+  box-shadow: 0 10px 24px rgba(239, 68, 68, 0.28);
+}
+
+.chat-composer__action.is-busy {
+  opacity: 0.72;
+}
+
+.chat-composer__action svg {
+  width: 20px;
+  height: 20px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-composer__action.is-stop svg {
+  fill: currentColor;
+  stroke: none;
+}
+
+.chat-composer-wrap {
+  padding: 20px 32px 28px;
+  background:
+    linear-gradient(180deg, rgba(249, 250, 251, 0), rgba(249, 250, 251, 0.94) 28%, rgba(249, 250, 251, 1));
+}
+
+.chat-composer-hint {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 10px;
+  color: #6b7280;
+  font-size: 12px;
 }
 
 .chat-thread {
   display: grid;
-  gap: 12px;
+  gap: 28px;
+  width: min(100%, 880px);
+  margin: 0 auto;
+  padding: 12px 32px 32px;
 }
 
-.chat-row {
+.chat-turn {
   display: flex;
+  gap: 16px;
+  align-items: flex-start;
 }
 
-.chat-row-user {
+.chat-turn-user {
+  flex-direction: row-reverse;
+}
+
+.chat-avatar {
+  flex: 0 0 34px;
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  font-weight: 800;
+  color: #fff;
+  box-shadow: 0 10px 22px rgba(15, 23, 42, 0.12);
+}
+
+.chat-avatar-user {
+  background: linear-gradient(135deg, #0f172a, #334155);
+}
+
+.chat-avatar-assistant {
+  background: linear-gradient(135deg, #10a37f, #0f8f6e);
+}
+
+.chat-avatar-assistant svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.chat-turn__body {
+  flex: 1;
+  min-width: 0;
+}
+
+.chat-turn__meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+  color: #6b7280;
+  font-size: 12px;
+}
+
+.chat-turn-user .chat-turn__meta {
   justify-content: flex-end;
 }
 
-.chat-row-assistant {
-  justify-content: flex-start;
+.chat-turn__author {
+  font-weight: 700;
+  color: #111827;
+}
+
+.chat-turn__model {
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #64748b;
 }
 
 .chat-bubble {
-  max-width: min(82%, 860px);
-  padding: 14px 16px;
-  border-radius: 18px;
+  width: 100%;
+  padding: 18px 20px;
+  border-radius: 22px;
+  line-height: 1.75;
 }
 
 .chat-bubble-user {
-  background: #dbeafe;
+  background: linear-gradient(180deg, #dbeafe, #c7dbff);
+  box-shadow: 0 18px 36px rgba(59, 130, 246, 0.12);
 }
 
 .chat-bubble-assistant {
-  background: var(--mm-soft);
+  background: rgba(255, 255, 255, 0.78);
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  box-shadow: 0 18px 42px rgba(15, 23, 42, 0.06);
 }
 
-.chat-role {
-  margin-bottom: 8px;
+.chat-empty {
+  width: min(100%, 760px);
+  margin: auto;
+  padding: 48px 32px 64px;
+  text-align: center;
+}
+
+.chat-empty__badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 32px;
+  padding: 0 12px;
+  border-radius: 999px;
+  background: rgba(15, 23, 42, 0.06);
+  color: #475569;
   font-size: 12px;
-  color: var(--mm-muted);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.chat-empty__title {
+  margin-top: 18px;
+  font-size: 32px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+  color: #0f172a;
+}
+
+.chat-empty__text {
+  margin-top: 14px;
+  color: #64748b;
+  line-height: 1.8;
+  font-size: 15px;
 }
 
 @media (max-width: 1080px) {
-  .chat-layout {
+  .chat-shell {
     grid-template-columns: 1fr;
+    min-height: auto;
   }
 
   .chat-sidebar {
     border-right: none;
     border-bottom: 1px solid rgba(15, 23, 42, 0.08);
-    padding-right: 0;
-    padding-bottom: 12px;
+    padding-bottom: 18px;
   }
 
   .chat-session-list {
-    max-height: 220px;
+    max-height: 260px;
+  }
+
+  .chat-main__header,
+  .chat-composer-wrap,
+  .chat-thread {
+    padding-left: 20px;
+    padding-right: 20px;
   }
 }
 </style>

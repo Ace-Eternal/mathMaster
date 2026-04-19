@@ -69,3 +69,12 @@ def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
             yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
 
     return StreamingResponse(sse_iter(), media_type="text/event-stream")
+
+
+@router.post("/generations/{generation_id}/cancel")
+def cancel_generation(generation_id: str, db: Session = Depends(get_db)):
+    service = ChatTutorService(db, LLMGateway())
+    try:
+        return service.cancel_generation(generation_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

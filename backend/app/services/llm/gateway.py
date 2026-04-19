@@ -4,7 +4,7 @@ import json
 import re
 import time
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 import requests
 
@@ -134,7 +134,14 @@ class LLMGateway:
                 ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
-    def stream_chat(self, *, system_prompt: str, messages: list[dict[str, Any]], model: str | None = None) -> Iterator[dict[str, Any]]:
+    def stream_chat(
+        self,
+        *,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        model: str | None = None,
+        should_stop: Callable[[], bool] | None = None,
+    ) -> Iterator[dict[str, Any]]:
         if self.use_mock:
             user_message = messages[-1]["content"]
             content = f"基于当前题目信息，可以先从已知条件、目标结论和可用方法三部分来分析：{user_message}"
@@ -151,27 +158,39 @@ class LLMGateway:
             "stream": True,
         }
         try:
-            active_model, chunk_iter = self._stream_chat_chunks(request_payload=request_payload)
+            active_model, chunk_iter = self._stream_chat_chunks(request_payload=request_payload, should_stop=should_stop)
             yield {"type": "start", "model_name": active_model}
-            for chunk in chunk_iter:
-                if chunk:
-                    yield {"type": "chunk", "content": chunk}
-            return
+            try:
+                for chunk in chunk_iter:
+                    if should_stop and should_stop():
+                        break
+                    if chunk:
+                        yield {"type": "chunk", "content": chunk}
+                return
+            finally:
+                if hasattr(chunk_iter, "close"):
+                    chunk_iter.close()
         except Exception as primary_error:  # noqa: BLE001
             fallback_errors: list[str] = []
             for fallback_model in self._fallback_models(requested_model=str(request_payload["model"])):
                 fallback_payload = {**request_payload, "model": fallback_model}
                 try:
-                    active_model, chunk_iter = self._stream_chat_chunks(request_payload=fallback_payload)
+                    active_model, chunk_iter = self._stream_chat_chunks(request_payload=fallback_payload, should_stop=should_stop)
                     yield {
                         "type": "start",
                         "model_name": active_model,
                         "notice": f"主模型调用失败，已切换备用模型 {fallback_model}: {primary_error}",
                     }
-                    for chunk in chunk_iter:
-                        if chunk:
-                            yield {"type": "chunk", "content": chunk}
-                    return
+                    try:
+                        for chunk in chunk_iter:
+                            if should_stop and should_stop():
+                                break
+                            if chunk:
+                                yield {"type": "chunk", "content": chunk}
+                        return
+                    finally:
+                        if hasattr(chunk_iter, "close"):
+                            chunk_iter.close()
                 except Exception as fallback_error:  # noqa: BLE001
                     fallback_errors.append(f"{fallback_model}: {fallback_error}")
             if fallback_errors:
@@ -509,7 +528,12 @@ class LLMGateway:
             return content
         raise RuntimeError(f"LLM streaming response empty for model {model_name}")
 
-    def _stream_chat_chunks(self, *, request_payload: dict[str, Any]) -> tuple[str, Iterator[str]]:
+    def _stream_chat_chunks(
+        self,
+        *,
+        request_payload: dict[str, Any],
+        should_stop: Callable[[], bool] | None = None,
+    ) -> tuple[str, Iterator[str]]:
         url = f"{self.base_url.rstrip('/')}/chat/completions"
         headers = {"Authorization": f"Bearer {self.api_key}"}
         payload = {**request_payload, "stream": True}
@@ -537,6 +561,8 @@ class LLMGateway:
                 def iterator() -> Iterator[str]:
                     try:
                         for raw_line in response.iter_lines(decode_unicode=False):
+                            if should_stop and should_stop():
+                                break
                             if raw_line in (None, b""):
                                 continue
                             if not raw_line.startswith(b"data: "):
