@@ -3,6 +3,10 @@ from __future__ import annotations
 import base64
 import json
 import mimetypes
+import threading
+import uuid
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -12,6 +16,60 @@ from sqlalchemy.orm import Session, selectinload
 from app.models import ChatMessage, ChatSession, Question
 from app.services.llm.gateway import LLMGateway
 from app.services.storage.factory import get_storage_service
+
+
+@dataclass
+class ChatGenerationState:
+    generation_id: str
+    session_id: int
+    question_id: int
+    started_at: datetime
+    cancelled: bool = False
+    finished_at: datetime | None = None
+    finish_reason: str | None = None
+
+
+class ChatGenerationRegistry:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._states: dict[str, ChatGenerationState] = {}
+
+    def register(self, *, session_id: int, question_id: int) -> ChatGenerationState:
+        state = ChatGenerationState(
+            generation_id=uuid.uuid4().hex,
+            session_id=session_id,
+            question_id=question_id,
+            started_at=datetime.now(UTC),
+        )
+        with self._lock:
+            self._states[state.generation_id] = state
+        return state
+
+    def cancel(self, generation_id: str) -> str | None:
+        with self._lock:
+            state = self._states.get(generation_id)
+            if state is None:
+                return None
+            if state.finished_at is not None:
+                return "already_finished"
+            state.cancelled = True
+            return "cancelled"
+
+    def is_cancelled(self, generation_id: str) -> bool:
+        with self._lock:
+            state = self._states.get(generation_id)
+            return bool(state and state.cancelled)
+
+    def finish(self, generation_id: str, *, finish_reason: str) -> None:
+        with self._lock:
+            state = self._states.get(generation_id)
+            if state is None:
+                return
+            state.finished_at = state.finished_at or datetime.now(UTC)
+            state.finish_reason = finish_reason
+
+
+chat_generation_registry = ChatGenerationRegistry()
 
 
 class ChatTutorService:
@@ -75,6 +133,7 @@ class ChatTutorService:
         self._append_user_message(session=session, content=content)
         self.db.commit()
         session = self._load_session(session.id)
+        generation = chat_generation_registry.register(session_id=session.id, question_id=question.id)
         history = [{"role": message.role, "content": message.content} for message in session.messages]
         multimodal_context = self._build_multimodal_context(
             question=question,
@@ -84,9 +143,11 @@ class ChatTutorService:
         def event_iter() -> Iterator[dict[str, Any]]:
             assistant_parts: list[str] = []
             model_name: str | None = None
+            finish_reason = "completed"
+            llm_stream = None
             try:
-                yield {"type": "meta", "session_id": session.id}
-                for event in self.llm_gateway.stream_chat(
+                yield {"type": "meta", "session_id": session.id, "generation_id": generation.generation_id}
+                llm_stream = self.llm_gateway.stream_chat(
                     system_prompt=self._build_system_prompt(),
                     messages=[
                         {
@@ -95,7 +156,12 @@ class ChatTutorService:
                         },
                         *history,
                     ],
-                ):
+                    should_stop=lambda: chat_generation_registry.is_cancelled(generation.generation_id),
+                )
+                for event in llm_stream:
+                    if chat_generation_registry.is_cancelled(generation.generation_id):
+                        finish_reason = "stopped"
+                        break
                     if event.get("type") == "start":
                         model_name = str(event.get("model_name") or "") or None
                         yield event
@@ -104,27 +170,45 @@ class ChatTutorService:
                         chunk = str(event.get("content") or "")
                         assistant_parts.append(chunk)
                         yield {"type": "chunk", "content": chunk}
+                if chat_generation_registry.is_cancelled(generation.generation_id):
+                    finish_reason = "stopped"
+                assistant_content = "".join(assistant_parts).strip()
+                if finish_reason == "stopped":
+                    assistant_content = self._append_stop_notice(assistant_content)
                 assistant_message = ChatMessage(
                     session_id=session.id,
                     role="assistant",
-                    content="".join(assistant_parts).strip(),
+                    content=assistant_content,
                     model_name=model_name,
                     token_usage=None,
                 )
                 self.db.add(assistant_message)
                 self.db.commit()
                 self.db.refresh(assistant_message)
+                chat_generation_registry.finish(generation.generation_id, finish_reason=finish_reason)
                 yield {
                     "type": "done",
                     "session_id": session.id,
                     "message_id": assistant_message.id,
                     "model_name": model_name,
+                    "generation_id": generation.generation_id,
+                    "finish_reason": finish_reason,
                 }
             except Exception as exc:  # noqa: BLE001
                 self.db.rollback()
+                chat_generation_registry.finish(generation.generation_id, finish_reason="error")
                 yield {"type": "error", "message": str(exc)}
+            finally:
+                if llm_stream is not None and hasattr(llm_stream, "close"):
+                    llm_stream.close()
 
         return session.id, event_iter()
+
+    def cancel_generation(self, generation_id: str) -> dict[str, Any]:
+        status = chat_generation_registry.cancel(generation_id)
+        if status is None:
+            raise ValueError("Generation not found")
+        return {"ok": True, "generation_id": generation_id, "status": status}
 
     def _load_question(self, question_id: int) -> Question:
         return self.db.execute(
@@ -172,6 +256,16 @@ class ChatTutorService:
         if not current_title or current_title.startswith("Question "):
             session.title = normalized_content[:40]
         self.db.add(session)
+
+    @staticmethod
+    def _append_stop_notice(content: str) -> str:
+        notice = "> 已停止生成"
+        normalized = (content or "").strip()
+        if not normalized:
+            return notice
+        if notice in normalized:
+            return normalized
+        return f"{normalized}\n\n{notice}"
 
     @staticmethod
     def _build_context_prefix(question: Question) -> str:
