@@ -756,6 +756,7 @@ onBeforeUnmount(() => {
 
 .chat-session-list {
   display: grid;
+  grid-auto-rows: 148px;
   gap: 10px;
   flex: 1;
   overflow-y: auto;
@@ -781,6 +782,8 @@ onBeforeUnmount(() => {
   align-items: stretch;
   gap: 8px;
   width: 100%;
+  min-height: 148px;
+  height: 148px;
   border: 1px solid transparent;
   border-radius: 14px;
   padding: 8px;
@@ -801,11 +804,14 @@ onBeforeUnmount(() => {
 .chat-session-item__main {
   flex: 1;
   min-width: 0;
+  min-height: 100%;
   border: none;
   background: transparent;
   text-align: left;
   cursor: pointer;
   padding: 6px;
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-session-item__main:disabled {
@@ -817,6 +823,9 @@ onBeforeUnmount(() => {
   font-size: 14px;
   font-weight: 700;
   line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-session-preview {
@@ -828,15 +837,28 @@ onBeforeUnmount(() => {
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+  min-height: 36px;
 }
 
 .chat-session-meta {
   display: flex;
   justify-content: space-between;
+  align-items: center;
   gap: 10px;
-  margin-top: 8px;
+  margin-top: auto;
   color: #64748b;
   font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+.chat-session-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chat-session-meta span:last-child {
+  text-align: right;
 }
 
 .chat-session-model {
@@ -844,6 +866,9 @@ onBeforeUnmount(() => {
   color: #0f766e;
   font-size: 11px;
   font-weight: 700;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chat-session-delete {

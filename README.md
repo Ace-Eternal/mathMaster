@@ -82,16 +82,20 @@ LLM_USE_MOCK=false
 
 ```powershell
 cd backend
-python -m venv .venv
-.venv\Scripts\activate
-pip install -e .
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uv sync
+uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 后端启动时会自动：
 
 - 创建 `D:\code\mathMaster\data` 及其子目录
 - 初始化 SQLite 数据库表
+
+后端现已切换为 `uv` 工作流：
+
+- Python 版本固定在 [backend/.python-version](/D:/code/mathMaster/backend/.python-version)
+- 依赖锁定文件为 [backend/uv.lock](/D:/code/mathMaster/backend/uv.lock)
+- 首次进入项目时直接执行 `uv sync` 即可创建或更新 `backend/.venv`
 
 ### 前端
 
@@ -128,7 +132,7 @@ npm run dev
 
 ```powershell
 cd backend
-pytest
+uv run pytest
 ```
 
 当前包含的基础测试：
