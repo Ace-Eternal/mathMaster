@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
 import MarkdownContent from '../components/MarkdownContent.vue'
 
@@ -9,6 +9,7 @@ const detail = ref<any>(null)
 const message = ref('')
 const session = ref<any>(null)
 const chatSessions = ref<any[]>([])
+const chatModels = ref<any[]>([])
 const dictionaryOptions = ref({ knowledgePoints: [] as any[], solutionMethods: [] as any[] })
 const tagForm = ref({ knowledge_point_ids: [] as number[], solution_method_ids: [] as number[] })
 const savingTags = ref(false)
@@ -19,6 +20,8 @@ const streamController = ref<AbortController | null>(null)
 const streamState = ref<'idle' | 'streaming' | 'stopping'>('idle')
 const activeGenerationId = ref<string | null>(null)
 const activeAssistantMessage = ref<any>(null)
+const selectedModel = ref<string | null>(null)
+const defaultChatModel = ref<string | null>(null)
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'
 const STOP_NOTICE = '\n\n> 已停止生成'
 
@@ -30,12 +33,14 @@ const activeSessionId = computed(() => session.value?.id ?? null)
 const isStreaming = computed(() => streamState.value === 'streaming')
 const isStopping = computed(() => streamState.value === 'stopping')
 const showStopAction = computed(() => streamState.value !== 'idle')
+const canManageHistory = computed(() => streamState.value === 'idle')
 const composerButtonDisabled = computed(() => {
   if (isStopping.value) return true
   if (isStreaming.value) return false
   return !message.value.trim()
 })
 const composerButtonLabel = computed(() => (isStreaming.value ? '停止生成' : '发送消息'))
+const currentModelLabel = computed(() => selectedModel.value || defaultChatModel.value || '默认模型')
 
 const load = async () => {
   detail.value = (await api.get(`/questions/${props.id}`)).data
@@ -66,13 +71,26 @@ const loadChatSessions = async () => {
   chatSessions.value = data
   if (!session.value && data.length) {
     await selectSession(data[0].id)
+  } else if (!data.length && !session.value?.id) {
+    selectedModel.value = defaultChatModel.value
   }
 }
 
 const loadSession = async (sessionId: number) => {
   session.value = (await api.get(`/chat/sessions/${sessionId}`, { params: { question_id: Number(props.id) } })).data
+  selectedModel.value = session.value?.selected_model || defaultChatModel.value
   activePanels.value = ['chat']
   await scrollChatToBottom()
+}
+
+const loadChatModels = async () => {
+  const [modelsResponse, settingsResponse] = await Promise.all([api.get('/chat/models'), api.get('/settings')])
+  chatModels.value = modelsResponse.data || []
+  defaultChatModel.value =
+    chatModels.value.find((item: any) => item.is_default)?.id || settingsResponse.data?.models?.chat || null
+  if (!selectedModel.value) {
+    selectedModel.value = defaultChatModel.value
+  }
 }
 
 const selectSession = async (sessionId: number) => {
@@ -82,7 +100,8 @@ const selectSession = async (sessionId: number) => {
 
 const createNewSession = () => {
   if (streamState.value !== 'idle') return
-  session.value = null
+  session.value = { id: null, question_id: Number(props.id), messages: [], selected_model: defaultChatModel.value }
+  selectedModel.value = defaultChatModel.value
   message.value = ''
 }
 
@@ -152,6 +171,70 @@ const handleComposerKeydown = async (event: KeyboardEvent) => {
   }
 }
 
+const persistSessionModel = async (modelName: string | null) => {
+  if (!session.value?.id) return
+  const { data } = await api.patch(`/chat/sessions/${session.value.id}/model`, {
+    model_name: modelName,
+  })
+  session.value = data
+  selectedModel.value = data.selected_model || defaultChatModel.value
+  await loadChatSessions()
+}
+
+const handleModelChange = async (modelName: string | null) => {
+  selectedModel.value = modelName || defaultChatModel.value
+  if (!canManageHistory.value) return
+  if (!session.value?.id) {
+    if (session.value) {
+      session.value.selected_model = selectedModel.value
+    }
+    return
+  }
+  await persistSessionModel(selectedModel.value)
+}
+
+const removeSession = async (sessionId: number) => {
+  if (!canManageHistory.value) return
+  try {
+    await ElMessageBox.confirm('删除后将移除该会话下的全部追问与回答，是否继续？', '删除历史会话', {
+      type: 'warning',
+      confirmButtonText: '删除',
+      cancelButtonText: '取消',
+    })
+    await api.delete(`/chat/sessions/${sessionId}`, { params: { question_id: Number(props.id) } })
+    ElMessage.success('历史会话已删除')
+    if (activeSessionId.value === sessionId) {
+      session.value = null
+    }
+    await loadChatSessions()
+    if (!chatSessions.value.length) {
+      createNewSession()
+    } else if (!session.value?.id) {
+      await selectSession(chatSessions.value[0].id)
+    }
+  } catch {
+    // 用户取消删除时保持静默
+  }
+}
+
+const clearAllSessions = async () => {
+  if (!chatSessions.value.length || !canManageHistory.value) return
+  try {
+    await ElMessageBox.confirm('这会清空当前题目的全部讲题历史，且不可恢复，是否继续？', '清空历史会话', {
+      type: 'warning',
+      confirmButtonText: '清空',
+      cancelButtonText: '取消',
+    })
+    const { data } = await api.delete(`/chat/questions/${props.id}/sessions`)
+    session.value = null
+    chatSessions.value = []
+    createNewSession()
+    ElMessage.success(`已清空 ${data.deleted_count || 0} 个历史会话`)
+  } catch {
+    // 用户取消删除时保持静默
+  }
+}
+
 const sendMessage = async () => {
   const content = message.value.trim()
   if (!content || sendingMessage.value || streamState.value !== 'idle') return
@@ -161,7 +244,7 @@ const sendMessage = async () => {
   activeGenerationId.value = null
   activePanels.value = ['chat']
   if (!session.value) {
-    session.value = { id: null, question_id: Number(props.id), messages: [] }
+    session.value = { id: null, question_id: Number(props.id), messages: [], selected_model: selectedModel.value }
   }
   const streamAbortController = new AbortController()
   streamController.value = streamAbortController
@@ -185,6 +268,7 @@ const sendMessage = async () => {
         session_id: session.value?.id,
         question_id: Number(props.id),
         content,
+        model_name: selectedModel.value,
       }),
       signal: streamAbortController.signal,
     })
@@ -205,6 +289,7 @@ const sendMessage = async () => {
         if (!event) continue
         if (event.type === 'meta') {
           session.value.id = event.session_id
+          session.value.selected_model = selectedModel.value
           activeGenerationId.value = event.generation_id || null
           await loadChatSessions()
           continue
@@ -272,7 +357,10 @@ const saveTags = async () => {
 }
 
 onMounted(async () => {
-  await Promise.all([load(), loadDictionary(), loadChatSessions()])
+  await Promise.all([load(), loadDictionary(), loadChatModels(), loadChatSessions()])
+  if (!session.value && !chatSessions.value.length) {
+    createNewSession()
+  }
 })
 
 onBeforeUnmount(() => {
@@ -383,7 +471,10 @@ onBeforeUnmount(() => {
             <div class="chat-sidebar-title">讲题对话</div>
             <div class="chat-sidebar-subtitle">像 ChatGPT 一样连续追问、切换历史与继续追问。</div>
           </div>
-          <el-button text type="primary" @click.stop="createNewSession">新对话</el-button>
+          <div class="chat-sidebar-actions">
+            <el-button text type="danger" :disabled="!chatSessions.length || !canManageHistory" @click.stop="clearAllSessions">清空历史</el-button>
+            <el-button text type="primary" :disabled="!canManageHistory" @click.stop="createNewSession">新对话</el-button>
+          </div>
         </div>
 
         <div class="chat-sidebar-summary">
@@ -395,21 +486,31 @@ onBeforeUnmount(() => {
         </div>
 
         <div v-if="chatSessions.length" class="chat-session-list">
-          <button
+          <div
             v-for="item in chatSessions"
             :key="item.id"
-            type="button"
             class="chat-session-item"
             :class="{ active: activeSessionId === item.id }"
-            @click="selectSession(item.id)"
           >
-            <div class="chat-session-title">{{ item.title || `会话 ${item.id}` }}</div>
-            <div class="chat-session-preview">{{ item.last_message_preview || '暂无消息摘要' }}</div>
-            <div class="chat-session-meta">
-              <span>{{ item.message_count }} 条消息</span>
-              <span>{{ new Date(item.updated_at || item.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
-            </div>
-          </button>
+            <button type="button" class="chat-session-item__main" :disabled="!canManageHistory" @click="selectSession(item.id)">
+              <div class="chat-session-title">{{ item.title || `会话 ${item.id}` }}</div>
+              <div class="chat-session-preview">{{ item.last_message_preview || '暂无消息摘要' }}</div>
+              <div class="chat-session-meta">
+                <span>{{ item.message_count }} 条消息</span>
+                <span>{{ new Date(item.updated_at || item.created_at).toLocaleString('zh-CN', { hour12: false }) }}</span>
+              </div>
+              <div v-if="item.selected_model" class="chat-session-model">{{ item.selected_model }}</div>
+            </button>
+            <button
+              type="button"
+              class="chat-session-delete"
+              title="删除该会话"
+              :disabled="!canManageHistory"
+              @click.stop="removeSession(item.id)"
+            >
+              删
+            </button>
+          </div>
         </div>
         <div v-else class="chat-sidebar-empty">
           <div class="chat-sidebar-empty__title">还没有历史会话</div>
@@ -424,6 +525,24 @@ onBeforeUnmount(() => {
             <div class="chat-main__subtitle">
               {{ sendingMessage ? '正在流式生成讲解，你可以随时停止。' : '围绕当前题目继续提问，系统会直接结合题干、答案和图片上下文回答。' }}
             </div>
+          </div>
+          <div class="chat-main__controls">
+            <div class="chat-model-label">当前模型</div>
+            <el-select
+              :model-value="selectedModel"
+              class="chat-model-select"
+              :disabled="!canManageHistory"
+              placeholder="请选择模型"
+              @update:model-value="handleModelChange"
+            >
+              <el-option
+                v-for="item in chatModels"
+                :key="item.id"
+                :label="item.label"
+                :value="item.id"
+              />
+            </el-select>
+            <div class="chat-model-meta">{{ currentModelLabel }}</div>
           </div>
         </div>
 
@@ -587,6 +706,13 @@ onBeforeUnmount(() => {
   gap: 12px;
 }
 
+.chat-sidebar-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 4px;
+}
+
 .chat-sidebar-title {
   font-size: 18px;
   font-weight: 800;
@@ -651,13 +777,14 @@ onBeforeUnmount(() => {
 }
 
 .chat-session-item {
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
   width: 100%;
   border: 1px solid transparent;
   border-radius: 14px;
-  padding: 14px;
+  padding: 8px;
   background: transparent;
-  text-align: left;
-  cursor: pointer;
   transition: border-color 0.18s ease, background 0.18s ease;
 }
 
@@ -669,6 +796,20 @@ onBeforeUnmount(() => {
 .chat-session-item.active {
   border-color: rgba(16, 163, 127, 0.24);
   background: #fff;
+}
+
+.chat-session-item__main {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  padding: 6px;
+}
+
+.chat-session-item__main:disabled {
+  cursor: not-allowed;
 }
 
 .chat-session-title {
@@ -698,6 +839,31 @@ onBeforeUnmount(() => {
   font-size: 12px;
 }
 
+.chat-session-model {
+  margin-top: 8px;
+  color: #0f766e;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.chat-session-delete {
+  flex: 0 0 34px;
+  height: 34px;
+  margin-top: 6px;
+  border: none;
+  border-radius: 10px;
+  background: rgba(220, 38, 38, 0.1);
+  color: #dc2626;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.chat-session-delete:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
 .chat-main {
   min-width: 0;
   display: flex;
@@ -706,8 +872,34 @@ onBeforeUnmount(() => {
 }
 
 .chat-main__header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   padding: 26px 32px 18px;
   border-bottom: 1px solid rgba(15, 23, 42, 0.08);
+}
+
+.chat-main__controls {
+  display: grid;
+  gap: 6px;
+  min-width: 220px;
+}
+
+.chat-model-label {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.chat-model-select {
+  width: 100%;
+}
+
+.chat-model-meta {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+  text-align: right;
 }
 
 .chat-main__title {
@@ -965,6 +1157,19 @@ onBeforeUnmount(() => {
 
   .chat-session-list {
     max-height: 260px;
+  }
+
+  .chat-main__header {
+    flex-direction: column;
+  }
+
+  .chat-main__controls {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .chat-model-meta {
+    text-align: left;
   }
 
   .chat-main__header,

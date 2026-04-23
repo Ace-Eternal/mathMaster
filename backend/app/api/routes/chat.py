@@ -5,7 +5,13 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.question import ChatMessageRequest, ChatSessionListItemResponse, ChatSessionResponse
+from app.schemas.question import (
+    ChatMessageRequest,
+    ChatModelOptionResponse,
+    ChatSessionListItemResponse,
+    ChatSessionModelUpdateRequest,
+    ChatSessionResponse,
+)
 from app.services.chat import ChatTutorService
 from app.services.llm.gateway import LLMGateway
 
@@ -25,6 +31,7 @@ def list_sessions(question_id: int, db: Session = Depends(get_db)):
                 user_id=session.user_id,
                 question_id=session.question_id,
                 title=session.title,
+                selected_model=session.selected_model,
                 created_at=session.created_at,
                 updated_at=session.updated_at,
                 message_count=len(session.messages),
@@ -51,6 +58,7 @@ def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
         content=payload.content,
         user_id=payload.user_id,
         session_id=payload.session_id,
+        model_name=payload.model_name,
     )
     return ChatSessionResponse.model_validate(session)
 
@@ -62,6 +70,7 @@ def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
         content=payload.content,
         user_id=payload.user_id,
         session_id=payload.session_id,
+        model_name=payload.model_name,
     )
 
     def sse_iter():
@@ -78,3 +87,36 @@ def cancel_generation(generation_id: str, db: Session = Depends(get_db)):
         return service.cancel_generation(generation_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/models", response_model=list[ChatModelOptionResponse])
+def list_chat_models(db: Session = Depends(get_db)):
+    return ChatTutorService(db, LLMGateway()).list_chat_models()
+
+
+@router.patch("/sessions/{session_id}/model", response_model=ChatSessionResponse)
+def update_session_model(session_id: int, payload: ChatSessionModelUpdateRequest, db: Session = Depends(get_db)):
+    try:
+        session = ChatTutorService(db, LLMGateway()).update_session_model(
+            session_id=session_id,
+            model_name=payload.model_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return ChatSessionResponse.model_validate(session)
+
+
+@router.delete("/sessions/{session_id}")
+def delete_session(session_id: int, question_id: int | None = None, db: Session = Depends(get_db)):
+    service = ChatTutorService(db, LLMGateway())
+    try:
+        service.delete_session(session_id=session_id, question_id=question_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {"ok": True, "session_id": session_id}
+
+
+@router.delete("/questions/{question_id}/sessions")
+def clear_question_sessions(question_id: int, db: Session = Depends(get_db)):
+    deleted_count = ChatTutorService(db, LLMGateway()).clear_sessions(question_id=question_id)
+    return {"ok": True, "question_id": question_id, "deleted_count": deleted_count}

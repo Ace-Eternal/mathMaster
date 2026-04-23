@@ -121,6 +121,11 @@ class ChatMessageRequest(BaseModel):
     question_id: int
     content: str
     user_id: str | None = None
+    model_name: str | None = None
+
+
+class ChatSessionModelUpdateRequest(BaseModel):
+    model_name: str | None = None
 
 
 class ChatMessageResponse(ORMModel):
@@ -136,6 +141,7 @@ class ChatSessionResponse(TimestampedResponse):
     user_id: str | None = None
     question_id: int
     title: str | None = None
+    selected_model: str | None = None
     messages: list[ChatMessageResponse] = Field(default_factory=list)
 
 
@@ -144,5 +150,12 @@ class ChatSessionListItemResponse(TimestampedResponse):
     user_id: str | None = None
     question_id: int
     title: str | None = None
+    selected_model: str | None = None
     message_count: int = 0
     last_message_preview: str | None = None
+
+
+class ChatModelOptionResponse(BaseModel):
+    id: str
+    label: str
+    is_default: bool = False

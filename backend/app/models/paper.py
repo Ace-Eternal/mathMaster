@@ -234,6 +234,7 @@ class ChatSession(TimestampMixin, Base):
     user_id: Mapped[str | None] = mapped_column(String(128))
     question_id: Mapped[int] = mapped_column(ForeignKey("question.id"), nullable=False)
     title: Mapped[str | None] = mapped_column(String(255))
+    selected_model: Mapped[str | None] = mapped_column(String(128))
 
     question: Mapped["Question"] = relationship(back_populates="chat_sessions")
     messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session")

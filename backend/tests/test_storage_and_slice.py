@@ -6,6 +6,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.api.routes import templates as template_routes
+from app.core.config import settings
 from app.db.base import Base
 from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
@@ -942,15 +943,25 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
         class StubGateway:
             captured_messages = None
             captured_system_prompt = None
+            captured_model = None
 
             def chat(self, *, system_prompt, messages, model=None):
                 StubGateway.captured_system_prompt = system_prompt
                 StubGateway.captured_messages = messages
+                StubGateway.captured_model = model
                 return {"content": "讲解", "model_name": "stub", "token_usage": 1}
 
         monkeypatch.setattr("app.services.chat.get_storage_service", lambda: storage)
-        result = ChatTutorService(db, StubGateway()).send(question_id=question.id, content="请讲解", session_id=None, user_id="t")
+        result = ChatTutorService(db, StubGateway()).send(
+            question_id=question.id,
+            content="请讲解",
+            session_id=None,
+            user_id="t",
+            model_name="gpt-5.4-high",
+        )
         assert result.messages[-1].content == "讲解"
+        assert result.selected_model == "gpt-5.4-high"
+        assert StubGateway.captured_model == "gpt-5.4-high"
         first_message = StubGateway.captured_messages[0]
         assert isinstance(first_message["content"], list)
         text_part = next(part for part in first_message["content"] if part.get("type") == "text")
@@ -981,9 +992,11 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
 
         class StubGateway:
             captured_messages = None
+            captured_model = None
 
             def stream_chat(self, *, system_prompt, messages, model=None, should_stop=None):
                 StubGateway.captured_messages = messages
+                StubGateway.captured_model = model
                 yield {"type": "start", "model_name": "stub-model"}
                 yield {"type": "chunk", "content": "第一步。"}
                 yield {"type": "chunk", "content": "第二步。"}
@@ -994,6 +1007,7 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
             content="请讲解",
             session_id=None,
             user_id="stream",
+            model_name="gpt-5.4-mini",
         )
         events = list(event_iter)
         assert session_id > 0
@@ -1004,6 +1018,8 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
         messages = list(db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)).scalars())
         assert messages[-1].role == "assistant"
         assert messages[-1].content == "第一步。第二步。"
+        assert StubGateway.captured_model == "gpt-5.4-mini"
+        assert db.get(ChatSession, session_id).selected_model == "gpt-5.4-mini"
         first_message = StubGateway.captured_messages[0]
         text_part = next(part for part in first_message["content"] if part.get("type") == "text")
         assert "Answer:" not in text_part["text"]
@@ -1099,6 +1115,58 @@ def test_chat_tutor_service_get_session_validates_question():
 
         loaded = ChatTutorService(db, LLMGateway()).get_session(session_id=session.id, question_id=question.id)
         assert loaded.id == session.id
+
+
+def test_chat_tutor_service_update_delete_and_clear_sessions():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="10", stem_text="题干", review_status="APPROVED")
+        other_question = Question(paper_id=paper.id, question_no="11", stem_text="另一题", review_status="APPROVED")
+        db.add_all([question, other_question])
+        db.flush()
+        session_one = ChatSession(question_id=question.id, title="会话一")
+        session_two = ChatSession(question_id=question.id, title="会话二")
+        session_other = ChatSession(question_id=other_question.id, title="其他题目会话")
+        db.add_all([session_one, session_two, session_other])
+        db.flush()
+        session_one_id = session_one.id
+        session_two_id = session_two.id
+        session_other_id = session_other.id
+        db.add_all(
+            [
+                ChatMessage(session_id=session_one_id, role="user", content="第一条"),
+                ChatMessage(session_id=session_two_id, role="assistant", content="第二条"),
+                ChatMessage(session_id=session_other_id, role="user", content="第三条"),
+            ]
+        )
+        db.commit()
+
+        service = ChatTutorService(db, LLMGateway())
+        updated = service.update_session_model(session_id=session_one_id, model_name="gpt-5.4-high")
+        assert updated.selected_model == "gpt-5.4-high"
+
+        service.delete_session(session_id=session_one_id, question_id=question.id)
+        assert db.get(ChatSession, session_one_id) is None
+        assert db.execute(select(ChatMessage).where(ChatMessage.session_id == session_one_id)).scalar_one_or_none() is None
+
+        deleted_count = service.clear_sessions(question_id=question.id)
+        assert deleted_count == 1
+        assert db.get(ChatSession, session_two_id) is None
+        assert db.get(ChatSession, session_other_id) is not None
+        assert db.execute(select(ChatMessage).where(ChatMessage.session_id == session_two_id)).scalar_one_or_none() is None
+        assert db.execute(select(ChatMessage).where(ChatMessage.session_id == session_other_id)).scalar_one_or_none() is not None
+
+
+def test_llm_gateway_list_chat_models_falls_back_to_defaults():
+    gateway = LLMGateway()
+    gateway._get_available_models = lambda: []  # type: ignore[method-assign]
+    models = gateway.list_chat_models()
+    assert settings.default_model_chat in models
+    assert settings.fallback_model in models
 
 
 def test_llm_gateway_uses_high_for_multimodal_packy_chat():
