@@ -200,6 +200,19 @@ class LLMGateway:
                 ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
+    def list_chat_models(self) -> list[str]:
+        available_models = self._get_available_models()
+        chat_models = [model for model in available_models if model and model != "omni-moderation-latest"]
+        if chat_models:
+            return chat_models
+
+        fallback_models = [settings.default_model_chat, settings.fallback_model]
+        unique_models: list[str] = []
+        for model in fallback_models:
+            if model and model not in unique_models:
+                unique_models.append(model)
+        return unique_models
+
     def _run_structured_request(self, *, request_payload: dict[str, Any]) -> str:
         if self.is_packyapi:
             return self._post_chat_completions_streaming(request_payload=request_payload)

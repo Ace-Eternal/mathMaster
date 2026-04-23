@@ -87,9 +87,15 @@ class ChatTutorService:
         content: str,
         user_id: str | None = None,
         session_id: int | None = None,
+        model_name: str | None = None,
     ) -> ChatSession:
         question = self._load_question(question_id)
-        session = self._ensure_session(question=question, session_id=session_id, user_id=user_id)
+        session = self._ensure_session(
+            question=question,
+            session_id=session_id,
+            user_id=user_id,
+            model_name=model_name,
+        )
         self._append_user_message(session=session, content=content)
         self.db.flush()
         session = self._load_session(session.id)
@@ -107,6 +113,7 @@ class ChatTutorService:
                 },
                 *history,
             ],
+            model=session.selected_model,
         )
         self.db.add(
             ChatMessage(
@@ -127,9 +134,15 @@ class ChatTutorService:
         content: str,
         user_id: str | None = None,
         session_id: int | None = None,
+        model_name: str | None = None,
     ) -> tuple[int, Iterator[dict[str, Any]]]:
         question = self._load_question(question_id)
-        session = self._ensure_session(question=question, session_id=session_id, user_id=user_id)
+        session = self._ensure_session(
+            question=question,
+            session_id=session_id,
+            user_id=user_id,
+            model_name=model_name,
+        )
         self._append_user_message(session=session, content=content)
         self.db.commit()
         session = self._load_session(session.id)
@@ -156,6 +169,7 @@ class ChatTutorService:
                         },
                         *history,
                     ],
+                    model=session.selected_model,
                     should_stop=lambda: chat_generation_registry.is_cancelled(generation.generation_id),
                 )
                 for event in llm_stream:
@@ -210,6 +224,40 @@ class ChatTutorService:
             raise ValueError("Generation not found")
         return {"ok": True, "generation_id": generation_id, "status": status}
 
+    def list_chat_models(self) -> list[dict[str, Any]]:
+        default_model = self.llm_gateway._effective_chat_model(messages=[], requested_model=None)
+        return [
+            {
+                "id": model_name,
+                "label": model_name,
+                "is_default": model_name == default_model,
+            }
+            for model_name in self.llm_gateway.list_chat_models()
+        ]
+
+    def update_session_model(self, *, session_id: int, model_name: str | None) -> ChatSession:
+        session = self._load_session(session_id)
+        session.selected_model = (model_name or "").strip() or None
+        self.db.add(session)
+        self.db.commit()
+        return self._load_session(session_id)
+
+    def delete_session(self, *, session_id: int, question_id: int | None = None) -> None:
+        session = self.get_session(session_id=session_id, question_id=question_id)
+        self.db.query(ChatMessage).filter(ChatMessage.session_id == session.id).delete()
+        self.db.delete(session)
+        self.db.commit()
+
+    def clear_sessions(self, *, question_id: int) -> int:
+        sessions = self.list_sessions(question_id=question_id)
+        session_ids = [session.id for session in sessions]
+        if not session_ids:
+            return 0
+        self.db.query(ChatMessage).filter(ChatMessage.session_id.in_(session_ids)).delete(synchronize_session=False)
+        self.db.query(ChatSession).filter(ChatSession.id.in_(session_ids)).delete(synchronize_session=False)
+        self.db.commit()
+        return len(session_ids)
+
     def _load_question(self, question_id: int) -> Question:
         return self.db.execute(
             select(Question).options(selectinload(Question.answer), selectinload(Question.analysis)).where(Question.id == question_id)
@@ -231,15 +279,31 @@ class ChatTutorService:
             raise ValueError("Chat session not found for question")
         return session
 
-    def _ensure_session(self, *, question: Question, session_id: int | None, user_id: str | None) -> ChatSession:
+    def _ensure_session(
+        self,
+        *,
+        question: Question,
+        session_id: int | None,
+        user_id: str | None,
+        model_name: str | None,
+    ) -> ChatSession:
         session = (
             self.db.execute(select(ChatSession).options(selectinload(ChatSession.messages)).where(ChatSession.id == session_id)).scalar_one_or_none()
             if session_id
             else None
         )
+        normalized_model_name = (model_name or "").strip() or None
         if session:
+            if normalized_model_name and session.selected_model != normalized_model_name:
+                session.selected_model = normalized_model_name
+                self.db.add(session)
             return session
-        session = ChatSession(question_id=question.id, user_id=user_id, title=f"Question {question.question_no}")
+        session = ChatSession(
+            question_id=question.id,
+            user_id=user_id,
+            title=f"Question {question.question_no}",
+            selected_model=normalized_model_name,
+        )
         self.db.add(session)
         self.db.flush()
         return session

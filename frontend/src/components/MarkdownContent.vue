@@ -18,19 +18,31 @@ const markdown = new MarkdownIt({
 
 markdown.use(texmath, {
   engine: katex,
-  delimiters: 'dollars',
+  delimiters: ['dollars', 'brackets', 'beg_end'],
   katexOptions: {
     throwOnError: false,
     strict: 'ignore',
   },
 })
 
+const normalizeMathContent = (rawContent: string) =>
+  rawContent
+    .replace(/(^|[\r\n])\\\[\s*([\s\S]*?)\s*\\\](?=[\r\n]|$)/g, (_, prefix: string, formula: string) => {
+      const normalizedFormula = String(formula || '').trim()
+      return `${prefix}\n$$\n${normalizedFormula}\n$$\n`
+    })
+    .replace(/\\\((.+?)\\\)/g, (_, formula: string) => `$${String(formula || '').trim()}$`)
+    .replace(/(^|[\r\n])(\\begin\{[a-zA-Z*]+\}[\s\S]*?\\end\{[a-zA-Z*]+\})(?=[\r\n]|$)/g, (_, prefix: string, block: string) => {
+      const normalizedBlock = String(block || '').trim()
+      return `${prefix}\n$$\n${normalizedBlock}\n$$\n`
+    })
+
 const renderedHtml = computed(() => {
   const content = props.content?.trim()
   if (!content) {
     return ''
   }
-  return markdown.render(content)
+  return markdown.render(normalizeMathContent(content))
 })
 </script>
 
