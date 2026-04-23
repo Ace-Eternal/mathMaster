@@ -17,6 +17,12 @@ from app.models import AnswerSheet, ConversionJob, ImportJob, Paper, Question, Q
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
+from app.services.review_state import (
+    MATCH_AUTO_APPROVE_CONFIDENCE,
+    SAME_NUMBER_FALLBACK_NOTE,
+    has_complete_stem,
+    is_structurally_safe_for_auto_review,
+)
 from app.services.storage.base import FileStorageService
 from app.utils.files import build_storage_key, json_dumps, random_prefixed_name, sha256_bytes
 
@@ -930,21 +936,42 @@ class MatchService:
         result = self.llm_gateway.structured_output(scenario="global_answer_match", payload=payload)
         matched_answer_id = str(result.get("matched_answer_candidate_id") or "").strip()
         matched_answer = next((candidate for candidate in ranked_candidates if candidate.candidate_id == matched_answer_id), None)
-        exact_candidate = next(
-            (candidate for candidate in ranked_candidates if candidate.answer_question_no == question_candidate.question_no),
-            None,
-        )
+        same_no_candidates = [
+            candidate for candidate in ranked_candidates if candidate.answer_question_no == question_candidate.question_no
+        ]
+        exact_candidate = same_no_candidates[0] if len(same_no_candidates) == 1 else None
         confidence = float(result.get("match_confidence") or 0.0)
         needs_review = bool(result.get("need_manual_review") or question_candidate.need_manual_review)
         review_reason = str(result.get("review_reason") or "").strip() or question_candidate.review_reason
+        can_auto_pass_same_no = bool(
+            exact_candidate
+            and not question_candidate.need_manual_review
+            and not question_candidate.review_reason
+            and is_structurally_safe_for_auto_review(
+                stem_text=question_candidate.stem_text,
+                page_start=question_candidate.page_start,
+                has_unique_question_no=True,
+                answer_text=exact_candidate.stem_text,
+            )
+        )
         if not matched_answer:
             if exact_candidate is not None:
                 matched_answer = exact_candidate
                 matched_answer_id = exact_candidate.candidate_id
-                confidence = max(confidence, 0.78 if len(exact_candidate.stem_text.strip()) >= 20 else 0.65)
+                if can_auto_pass_same_no:
+                    confidence = max(confidence, MATCH_AUTO_APPROVE_CONFIDENCE)
+                    needs_review = False
+                    review_reason = None
+                else:
+                    confidence = max(confidence, 0.72 if has_complete_stem(exact_candidate.stem_text) else 0.58)
+                    needs_review = True
+                    fallback_reason = SAME_NUMBER_FALLBACK_NOTE
+                    review_reason = f"{review_reason}；{fallback_reason}" if review_reason else fallback_reason
+            elif same_no_candidates:
+                confidence = min(confidence or 0.45, 0.45)
                 needs_review = True
-                fallback_reason = "LLM 未返回有效候选，已回退到同题号答案"
-                review_reason = f"{review_reason}；{fallback_reason}" if review_reason else fallback_reason
+                duplicate_reason = "同题号答案候选不唯一"
+                review_reason = f"{review_reason}；{duplicate_reason}" if review_reason else duplicate_reason
             else:
                 confidence = min(confidence, 0.4)
                 needs_review = True
@@ -957,11 +984,21 @@ class MatchService:
         ):
             matched_answer = exact_candidate
             matched_answer_id = exact_candidate.candidate_id
-            confidence = max(confidence, 0.72 if len(exact_candidate.stem_text.strip()) >= 20 else 0.6)
+            if can_auto_pass_same_no:
+                confidence = max(confidence, MATCH_AUTO_APPROVE_CONFIDENCE)
+                needs_review = False
+                review_reason = None
+            else:
+                confidence = max(confidence, 0.74 if has_complete_stem(exact_candidate.stem_text) else 0.6)
+                needs_review = True
+                exact_reason = "LLM 结果与同题号答案冲突，已优先使用同题号候选"
+                review_reason = f"{review_reason}；{exact_reason}" if review_reason else exact_reason
+        elif matched_answer and len(same_no_candidates) > 1 and matched_answer.answer_question_no == question_candidate.question_no:
+            confidence = min(confidence or 0.45, 0.45)
             needs_review = True
-            exact_reason = "LLM 结果与同题号答案冲突，已优先使用同题号候选"
-            review_reason = f"{review_reason}；{exact_reason}" if review_reason else exact_reason
-        if not question_candidate.stem_text or len(question_candidate.stem_text) < 12:
+            duplicate_reason = "同题号答案候选不唯一"
+            review_reason = f"{review_reason}；{duplicate_reason}" if review_reason else duplicate_reason
+        if not has_complete_stem(question_candidate.stem_text):
             needs_review = True
         return {
             "question_no": question_candidate.question_no,
@@ -1586,13 +1623,6 @@ class PaperPipelineService:
             try:
                 analysis_service.analyze_question(question_id)
             except Exception as exc:  # noqa: BLE001
-                question = self.db.get(Question, question_id)
-                if question is not None:
-                    note = question.review_note or ""
-                    analysis_note = f"题目分析生成失败：{exc}"
-                    question.review_note = f"{note}；{analysis_note}".strip("；")
-                    self.db.add(question)
-                    self.db.commit()
                 analysis_warnings.append(f"question_id={question_id}: {exc}")
 
         paper.status = "REVIEW_PENDING" if pending_found else "SLICED"
@@ -1602,7 +1632,7 @@ class PaperPipelineService:
     def _build_review_note(self, candidate: QuestionSliceDraft, refined: dict[str, Any]) -> str | None:
         notes: list[str] = []
         confidence = float(refined.get("match_confidence") or 0.0)
-        if confidence < 0.75:
+        if refined.get("need_manual_review") and confidence < 0.75:
             notes.append(f"匹配置信度低 ({confidence:.2f})")
         if not refined.get("matched_answer"):
             notes.append("未匹配到答案")
@@ -1612,7 +1642,7 @@ class PaperPipelineService:
             notes.append(str(refined["review_reason"]))
         if candidate.page_start is None:
             notes.append("缺少页码定位")
-        if len(candidate.stem_text or "") < 12:
+        if not has_complete_stem(candidate.stem_text):
             notes.append("题干可能不完整")
         if candidate.image_blocks and not refined.get("image_refs"):
             notes.append("题图归属待确认")

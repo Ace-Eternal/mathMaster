@@ -270,7 +270,7 @@ def test_global_answer_match_normalization_does_not_default_to_first_candidate()
     )
     assert normalized["matched_answer_candidate_id"] == ""
     assert normalized["need_manual_review"] is True
-    assert normalized["match_confidence"] == 0.2
+    assert normalized["match_confidence"] == 0.0
 
 
 def test_match_service_prefers_same_question_number_when_llm_returns_invalid_candidate():
@@ -308,8 +308,44 @@ def test_match_service_prefers_same_question_number_when_llm_returns_invalid_can
     result = service.refine_and_match(question_candidate=question, answer_candidates=answer_candidates)
     assert result["matched_answer_candidate_id"] == "answer-18"
     assert result["matched_answer"].answer_question_no == "18"
+    assert result["need_manual_review"] is False
+    assert result["match_confidence"] >= 0.93
+    assert result["review_reason"] is None
+
+
+def test_match_service_keeps_manual_review_when_same_number_fallback_lacks_page_location():
+    class StubGateway:
+        def structured_output(self, *, scenario, payload):
+            assert scenario == "global_answer_match"
+            return {
+                "matched_answer_candidate_id": "",
+                "match_confidence": 0.0,
+                "need_manual_review": True,
+                "review_reason": "",
+            }
+
+    question = type(
+        "QuestionDraft",
+        (),
+        {
+            "candidate_id": "paper-18",
+            "question_no": "18",
+            "question_type": "解答题",
+            "stem_text": "18. 求证平面垂直条件",
+            "page_start": None,
+            "page_end": None,
+            "has_sub_questions": True,
+            "image_blocks": [],
+            "need_manual_review": False,
+            "review_reason": None,
+        },
+    )()
+    answer_candidates = [
+        AnswerSliceDraft("answer-18", "18", "（1）证明...\n（2）计算...", "（1）证明...\n（2）计算...", {}, 3, 4, [], True, False, None),
+    ]
+    result = MatchService(StubGateway()).refine_and_match(question_candidate=question, answer_candidates=answer_candidates)
+    assert result["matched_answer_candidate_id"] == "answer-18"
     assert result["need_manual_review"] is True
-    assert result["match_confidence"] >= 0.65
     assert "同题号答案" in (result["review_reason"] or "")
 
 
@@ -535,6 +571,42 @@ def test_analysis_service_sanitizes_internal_notice_before_storage():
         assert "_fallback_notice" not in payload
 
 
+def test_analysis_service_clears_stale_failure_note_after_success():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="概率试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="8",
+            stem_text="判断互斥事件。",
+            page_start=1,
+            review_status="PENDING",
+            review_note="题目分析生成失败：题目 8 的分析结果缺少知识点，拒绝落库。",
+        )
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="A", match_status="AUTO_MATCHED"))
+        db.commit()
+
+        class StubGateway:
+            def structured_output(self, *, scenario, model=None, payload=None):
+                return {
+                    "major_knowledge_points": ["概率与统计"],
+                    "minor_knowledge_points": ["互斥事件与对立事件"],
+                    "solution_methods": ["概率计算"],
+                    "explanation_md": "讲解内容",
+                    "confidence": 0.8,
+                    "need_manual_review": False,
+                }
+
+        KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
+        refreshed = db.get(Question, question.id)
+        assert refreshed.review_note is None
+
+
 def test_analysis_service_rejects_dictionary_echo_results():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -616,6 +688,84 @@ def test_review_service_build_question_detail_response_handles_analysis_links(tm
         assert payload.knowledges[0].name == "函数与导数"
         assert payload.methods[0].name == "分类讨论"
         assert payload.analysis.explanation_md == "讲解"
+
+
+def test_review_service_maintains_clean_review_state_for_noise_only_records(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="19",
+            stem_text="19. 已知数列 {an} 满足条件，求通项公式。",
+            page_start=2,
+            page_end=2,
+            review_status="PENDING",
+            review_note="匹配置信度低 (0.20)；LLM 未返回有效候选，已回退到同题号答案；题目分析生成失败：题目 19 的分析结果缺少知识点，拒绝落库。",
+        )
+        db.add(question)
+        db.flush()
+        db.add(
+            QuestionAnswer(
+                question_id=question.id,
+                answer_text="an = 2^n - 1",
+                match_status="AUTO_MATCHED",
+                match_confidence=0.2,
+            )
+        )
+        db.add(
+            QuestionAnalysis(
+                question_id=question.id,
+                analysis_json='{"major_knowledge_points":["数列"],"minor_knowledge_points":[],"solution_methods":["递推法"],"explanation_md":"讲解","confidence":0.8,"need_manual_review":false}',
+                explanation_md="讲解",
+                review_status="APPROVED",
+            )
+        )
+        db.commit()
+
+        payload = ReviewService(db, storage).build_question_detail_response(question.id)
+        assert payload.review_status == "APPROVED"
+        assert payload.review_note is None
+        assert payload.answer.match_confidence >= 0.93
+
+
+def test_review_service_maintains_clean_review_state_without_analysis_record(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="8",
+            stem_text="8. 在正方体中判断线面角的取值范围。",
+            page_start=1,
+            page_end=1,
+            review_status="PENDING",
+            review_note="题目分析生成失败：题目 8 的分析结果缺少知识点，拒绝落库。；匹配置信度低 (0.65)；LLM 未返回有效候选，已回退到同题号答案",
+        )
+        db.add(question)
+        db.flush()
+        db.add(
+            QuestionAnswer(
+                question_id=question.id,
+                answer_text="D",
+                match_status="AUTO_MATCHED",
+                match_confidence=0.65,
+            )
+        )
+        db.commit()
+
+        payload = ReviewService(db, storage).build_question_detail_response(question.id)
+        assert payload.review_status == "APPROVED"
+        assert payload.review_note is None
+        assert payload.answer.match_confidence >= 0.93
 
 
 def test_review_service_create_update_delete_question_syncs_slice_files_and_relations(tmp_path):
@@ -760,7 +910,9 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
     Base.metadata.create_all(engine)
     storage = LocalFileStorageService(base_dir=str(tmp_path))
     storage.save_file(b'{"image_refs":[{"src":"images/demo.png"}],"blocks":[]}', "slices/1/q_001/question.json")
+    storage.save_file(b'{"image_refs":[{"src":"images/answer.png"}],"blocks":[]}', "slices/1/q_001/answer.json")
     storage.save_file(b"\x89PNG\r\n\x1a\n", "mineu/1/images/demo.png")
+    storage.save_file(b"\x89PNG\r\n\x1a\n", "mineu/1/images/answer.png")
 
     with Session(engine) as db:
         paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
@@ -771,17 +923,28 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
             question_no="1",
             stem_text="如图，求线面角。",
             question_json_path="slices/1/q_001/question.json",
+            review_note="这里不该传给 LLM",
             review_status="APPROVED",
         )
         db.add(question)
         db.flush()
-        db.add(QuestionAnswer(question_id=question.id, answer_text="略", match_status="AUTO_MATCHED"))
+        db.add(
+            QuestionAnswer(
+                question_id=question.id,
+                answer_text="标准答案",
+                answer_json_path="slices/1/q_001/answer.json",
+                match_status="AUTO_MATCHED",
+            )
+        )
+        db.add(QuestionAnalysis(question_id=question.id, analysis_json="{}", explanation_md="标准解析"))
         db.commit()
 
         class StubGateway:
             captured_messages = None
+            captured_system_prompt = None
 
             def chat(self, *, system_prompt, messages, model=None):
+                StubGateway.captured_system_prompt = system_prompt
                 StubGateway.captured_messages = messages
                 return {"content": "讲解", "model_name": "stub", "token_usage": 1}
 
@@ -790,7 +953,14 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
         assert result.messages[-1].content == "讲解"
         first_message = StubGateway.captured_messages[0]
         assert isinstance(first_message["content"], list)
-        assert any(part.get("type") == "image_url" for part in first_message["content"])
+        text_part = next(part for part in first_message["content"] if part.get("type") == "text")
+        assert "Answer:" not in text_part["text"]
+        assert "Analysis:" not in text_part["text"]
+        assert "标准答案" not in text_part["text"]
+        assert "标准解析" not in text_part["text"]
+        assert "当前提供给你的只有题目侧上下文，不保证包含标准答案或解析。" in StubGateway.captured_system_prompt
+        image_parts = [part for part in first_message["content"] if part.get("type") == "image_url"]
+        assert len(image_parts) == 1
 
 
 def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, monkeypatch):
@@ -806,10 +976,14 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
         db.add(question)
         db.flush()
         db.add(QuestionAnswer(question_id=question.id, answer_text="1/2", match_status="AUTO_MATCHED"))
+        db.add(QuestionAnalysis(question_id=question.id, analysis_json="{}", explanation_md="不要外传"))
         db.commit()
 
         class StubGateway:
+            captured_messages = None
+
             def stream_chat(self, *, system_prompt, messages, model=None, should_stop=None):
+                StubGateway.captured_messages = messages
                 yield {"type": "start", "model_name": "stub-model"}
                 yield {"type": "chunk", "content": "第一步。"}
                 yield {"type": "chunk", "content": "第二步。"}
@@ -830,6 +1004,12 @@ def test_chat_tutor_service_stream_send_persists_assistant_message(tmp_path, mon
         messages = list(db.execute(select(ChatMessage).where(ChatMessage.session_id == session_id).order_by(ChatMessage.id)).scalars())
         assert messages[-1].role == "assistant"
         assert messages[-1].content == "第一步。第二步。"
+        first_message = StubGateway.captured_messages[0]
+        text_part = next(part for part in first_message["content"] if part.get("type") == "text")
+        assert "Answer:" not in text_part["text"]
+        assert "Analysis:" not in text_part["text"]
+        assert "1/2" not in text_part["text"]
+        assert "不要外传" not in text_part["text"]
 
 
 def test_chat_tutor_service_cancel_generation_preserves_partial_message(tmp_path, monkeypatch):

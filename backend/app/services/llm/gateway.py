@@ -415,21 +415,13 @@ class LLMGateway:
             required_keys = {"matched_answer_candidate_id", "match_confidence", "need_manual_review", "review_reason"}
             if required_keys.issubset(result.keys()):
                 return result
-            candidates = payload.get("answer_candidates") or []
-            question_no = str(payload.get("question_no") or "").strip()
-            preferred = next(
-                (candidate for candidate in candidates if str(candidate.get("answer_question_no") or "").strip() == question_no),
-                None,
-            )
-            if preferred is None:
-                preferred = {}
             normalized = {
                 "matched_answer_candidate_id": str(
                     result.get("matched_answer_candidate_id")
                     or result.get("answer_candidate_id")
                     or ""
                 ),
-                "match_confidence": float(result.get("match_confidence") if result.get("match_confidence") is not None else 0.2),
+                "match_confidence": float(result.get("match_confidence") if result.get("match_confidence") is not None else 0.0),
                 "need_manual_review": bool(
                     result.get("need_manual_review")
                     if result.get("need_manual_review") is not None

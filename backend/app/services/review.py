@@ -4,12 +4,21 @@ import json
 import re
 
 from fastapi import HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from slugify import slugify
 
 from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnalysis, QuestionAnswer, QuestionKnowledge, QuestionMethod, ReviewRecord
 from app.schemas.question import QuestionCreateRequest, QuestionDetailResponse, QuestionUpdateRequest, ReviewQueueItem, ReviewUpdateRequest
+from app.services.review_state import (
+    MATCH_AUTO_APPROVE_CONFIDENCE,
+    is_analysis_failure_note,
+    is_low_confidence_note,
+    is_same_number_fallback_note,
+    is_structurally_safe_for_auto_review,
+    join_review_notes,
+    split_review_notes,
+)
 from app.services.storage.base import FileStorageService
 from app.utils.files import build_storage_key, json_dumps
 
@@ -18,6 +27,29 @@ class ReviewService:
     def __init__(self, db: Session, storage: FileStorageService) -> None:
         self.db = db
         self.storage = storage
+
+    def maintain_review_state(self, *, question_id: int | None = None) -> int:
+        duplicate_keys = {
+            (paper_id, question_no)
+            for paper_id, question_no, count in self.db.execute(
+                select(Question.paper_id, Question.question_no, func.count(Question.id))
+                .group_by(Question.paper_id, Question.question_no)
+            ).all()
+            if count > 1
+        }
+        stmt = select(Question).options(selectinload(Question.answer), selectinload(Question.analysis))
+        if question_id is not None:
+            stmt = stmt.where(Question.id == question_id)
+        else:
+            stmt = stmt.where(or_(Question.review_status == "PENDING", Question.review_note.is_not(None)))
+        questions = list(self.db.execute(stmt).scalars())
+        updated = 0
+        for question in questions:
+            if self._maintain_single_question_review_state(question, duplicate_keys=duplicate_keys):
+                updated += 1
+        if updated:
+            self.db.commit()
+        return updated
 
     def create_question(self, paper_id: int, payload: QuestionCreateRequest) -> Question:
         paper = self._get_paper(paper_id)
@@ -157,6 +189,7 @@ class ReviewService:
         has_answer: bool | None = None,
         include_deleted: bool = False,
     ) -> list[ReviewQueueItem]:
+        self.maintain_review_state()
         stmt = (
             select(Question, Paper)
             .join(Paper, Paper.id == Question.paper_id)
@@ -193,6 +226,7 @@ class ReviewService:
         return items
 
     def build_question_detail_response(self, question_id: int) -> QuestionDetailResponse:
+        self.maintain_review_state(question_id=question_id)
         question = self._load_question(question_id)
         answer_payload = None
         if question.answer is not None:
@@ -315,6 +349,70 @@ class ReviewService:
             if path and path not in new_paths and self.storage.exists(path):
                 self.storage.delete_file(path)
         self.db.flush()
+
+    def _maintain_single_question_review_state(
+        self,
+        question: Question,
+        *,
+        duplicate_keys: set[tuple[int, str]],
+    ) -> bool:
+        original_note = question.review_note
+        original_status = question.review_status
+        original_confidence = (
+            float(question.answer.match_confidence)
+            if question.answer and question.answer.match_confidence is not None
+            else None
+        )
+
+        actionable_notes: list[str] = []
+        match_noise_notes: list[str] = []
+        for note in split_review_notes(question.review_note):
+            if is_analysis_failure_note(note):
+                continue
+            if is_low_confidence_note(note) or is_same_number_fallback_note(note):
+                match_noise_notes.append(note)
+                continue
+            actionable_notes.append(note)
+
+        can_auto_approve = is_structurally_safe_for_auto_review(
+            stem_text=question.stem_text,
+            page_start=question.page_start,
+            has_unique_question_no=(question.paper_id, question.question_no) not in duplicate_keys,
+            answer_text=question.answer.answer_text if question.answer else None,
+        ) and not actionable_notes
+
+        question.review_note = join_review_notes(actionable_notes if can_auto_approve else [*actionable_notes, *match_noise_notes])
+        if can_auto_approve and question.review_status == "PENDING":
+            question.review_status = "APPROVED"
+        if (
+            can_auto_approve
+            and question.answer is not None
+            and (
+                question.answer.match_confidence is None
+                or float(question.answer.match_confidence) < MATCH_AUTO_APPROVE_CONFIDENCE
+            )
+        ):
+            question.answer.match_confidence = MATCH_AUTO_APPROVE_CONFIDENCE
+            self.db.add(question.answer)
+
+        changed = (
+            original_note != question.review_note
+            or original_status != question.review_status
+            or (
+                question.answer is not None
+                and (
+                    original_confidence
+                    != (
+                        float(question.answer.match_confidence)
+                        if question.answer.match_confidence is not None
+                        else None
+                    )
+                )
+            )
+        )
+        if changed:
+            self.db.add(question)
+        return changed
 
     @staticmethod
     def _build_folder_names(questions: list[Question]) -> dict[int, str]:
