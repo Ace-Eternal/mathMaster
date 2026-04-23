@@ -271,14 +271,13 @@ class ChatTutorService:
     def _build_context_prefix(question: Question) -> str:
         return (
             f"Question No: {question.question_no}\n"
-            f"Stem: {question.stem_text}\n"
-            f"Answer: {question.answer.answer_text if question.answer else 'N/A'}\n"
-            f"Analysis: {question.analysis.explanation_md if question.analysis else 'N/A'}"
+            f"Stem: {question.stem_text}"
         )
 
     def _build_system_prompt(self) -> str:
         return (
             f"{self.system_prompt}\n\n"
+            "当前提供给你的只有题目侧上下文，不保证包含标准答案或解析。"
             "你已经拿到了完整题目上下文，不要要求用户重复发送题目，不要谈代码、bug、功能开发。"
             "请直接围绕当前数学题进行教学式讲解。"
         )
@@ -297,7 +296,7 @@ class ChatTutorService:
     def _load_question_image_parts(self, *, question: Question) -> list[dict[str, Any]]:
         storage = get_storage_service()
         image_parts: list[dict[str, Any]] = []
-        for json_path in [question.question_json_path, question.answer.answer_json_path if question.answer else None]:
+        for json_path in [question.question_json_path]:
             if not json_path or not storage.exists(json_path):
                 continue
             try:

@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, selectinload
 from app.core.config import settings
 from app.models import KnowledgePoint, Question, QuestionAnalysis, QuestionKnowledge, QuestionMethod, SolutionMethod
 from app.services.llm.gateway import LLMGateway
+from app.services.review_state import is_analysis_failure_note, join_review_notes, split_review_notes
 
 
 class KnowledgeAnalysisService:
@@ -38,6 +39,12 @@ class KnowledgeAnalysisService:
         analysis.model_name = settings.default_model_analysis
         analysis.review_status = "PENDING" if stored_result.get("need_manual_review") else "APPROVED"
         self.db.add(analysis)
+        cleaned_review_note = join_review_notes(
+            note for note in split_review_notes(question.review_note) if not is_analysis_failure_note(note)
+        )
+        if question.review_note != cleaned_review_note:
+            question.review_note = cleaned_review_note
+            self.db.add(question)
         self.db.flush()
 
         self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id == question.id).delete()

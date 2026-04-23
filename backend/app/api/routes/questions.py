@@ -12,6 +12,7 @@ from app.core.config import settings
 from app.db.session import get_db
 from app.models import Paper, Question, QuestionAnalysis, QuestionKnowledge, QuestionMethod
 from app.schemas.question import QuestionDetailResponse, QuestionTagUpdateRequest
+from app.services.review import ReviewService
 from app.services.storage.base import FileStorageService
 from app.services.storage.factory import get_storage_service
 
@@ -170,6 +171,7 @@ def _extract_images_from_document(
 
 @router.get("/{question_id}", response_model=QuestionDetailResponse)
 def get_question(question_id: int, request: Request, db: Session = Depends(get_db)):
+    ReviewService(db, get_storage_service()).maintain_review_state(question_id=question_id)
     question = db.execute(
         select(Question)
         .options(
