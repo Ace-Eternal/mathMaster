@@ -239,7 +239,7 @@ onMounted(async () => {
           <div class="pdf-card__header">
             <div>
               <h3>原试卷 PDF</h3>
-              <div class="muted">{{ paperPdfPath || '缺失试卷原文件' }}</div>
+              <div class="muted pdf-card__path" :title="paperPdfPath || '缺失试卷原文件'">{{ paperPdfPath || '缺失试卷原文件' }}</div>
             </div>
             <a v-if="paperPdfUrl" :href="paperPdfUrl" target="_blank" rel="noreferrer">新标签打开</a>
           </div>
@@ -251,7 +251,7 @@ onMounted(async () => {
           <div class="pdf-card__header">
             <div>
               <h3>原答案 PDF</h3>
-              <div class="muted">{{ answerPdfPath || '缺失答案原文件' }}</div>
+              <div class="muted pdf-card__path" :title="answerPdfPath || '缺失答案原文件'">{{ answerPdfPath || '缺失答案原文件' }}</div>
             </div>
             <a v-if="answerPdfUrl" :href="answerPdfUrl" target="_blank" rel="noreferrer">新标签打开</a>
           </div>
@@ -303,15 +303,20 @@ onMounted(async () => {
 
 .review-content-grid {
   display: grid;
-  grid-template-columns: minmax(520px, 1.25fr) minmax(360px, 1fr);
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
   gap: 18px;
   align-items: stretch;
 }
 
 .preview-panel,
 .pdf-panel {
+  min-width: 0;
   min-height: 720px;
   height: 100%;
+}
+
+.pdf-panel {
+  overflow: hidden;
 }
 
 .review-edit-form :deep(.el-form-item) {
@@ -365,7 +370,9 @@ onMounted(async () => {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr);
   gap: 12px;
+  min-width: 0;
   min-height: 0;
+  overflow: hidden;
 }
 
 .pdf-card__header {
@@ -373,12 +380,34 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+  min-width: 0;
+}
+
+.pdf-card__header > div {
+  min-width: 0;
+}
+
+.pdf-card__header a {
+  flex: 0 0 auto;
+  white-space: nowrap;
+  color: var(--mm-primary-deep);
+  font-weight: 600;
+}
+
+.pdf-card__path {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pdf-frame {
+  display: block;
   width: 100%;
+  max-width: 100%;
   height: 100%;
   min-height: 520px;
+  min-width: 0;
   border: 1px solid var(--mm-border);
   border-radius: 16px;
   background: #fff;
@@ -414,7 +443,7 @@ onMounted(async () => {
 
 @media (max-width: 1680px) {
   .review-content-grid {
-    grid-template-columns: minmax(480px, 1.15fr) minmax(320px, 1fr);
+    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
   }
 }
 

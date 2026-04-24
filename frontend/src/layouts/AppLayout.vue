@@ -8,6 +8,7 @@
 
       <nav class="topbar__nav">
         <RouterLink class="nav-link" to="/papers">工作台</RouterLink>
+        <RouterLink class="nav-link" to="/paper-management">试卷管理</RouterLink>
         <RouterLink class="nav-link" to="/review">人工审核</RouterLink>
         <RouterLink class="nav-link" to="/search">题库搜索</RouterLink>
         <RouterLink class="nav-link" to="/templates">解题模板</RouterLink>

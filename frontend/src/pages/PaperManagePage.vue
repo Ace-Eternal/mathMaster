@@ -138,7 +138,7 @@ onMounted(loadPapers)
 </script>
 
 <template>
-  <div class="section-stack">
+  <div class="section-stack paper-manage-page">
     <div class="page-header">
       <div>
         <div class="page-title">试卷管理</div>
@@ -151,8 +151,8 @@ onMounted(loadPapers)
       </div>
     </div>
 
-    <section class="panel">
-      <el-form inline>
+    <section class="panel paper-filter-panel">
+      <el-form class="paper-filter-form" label-position="top">
         <el-form-item label="标题">
           <el-input v-model="filters.keyword" placeholder="试卷标题关键词" />
         </el-form-item>
@@ -174,12 +174,14 @@ onMounted(loadPapers)
         <el-form-item label="已删除">
           <el-switch v-model="filters.include_deleted" />
         </el-form-item>
-        <el-button type="primary" @click="loadPapers">筛选</el-button>
+        <el-form-item class="paper-filter-actions">
+          <el-button type="primary" @click="loadPapers">筛选</el-button>
+        </el-form-item>
       </el-form>
     </section>
 
-    <section class="panel">
-      <el-table :data="papers" v-loading="loading">
+    <section class="panel paper-table-panel">
+      <el-table class="paper-manage-table" :data="papers" v-loading="loading">
         <el-table-column prop="title" label="标题" min-width="220" />
         <el-table-column prop="year" label="年份" width="90" />
         <el-table-column prop="region" label="地区" width="100" />
@@ -200,14 +202,16 @@ onMounted(loadPapers)
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="380" fixed="right">
+        <el-table-column label="操作" min-width="300">
           <template #default="{ row }">
-            <RouterLink :to="`/papers/${row.id}`"><el-button text>详情</el-button></RouterLink>
-            <el-button text @click="openEdit(row)">编辑</el-button>
-            <el-button text type="primary" @click="rerun(row.id)">重跑</el-button>
-            <el-button v-if="row.answer_sheet?.has_answer" text type="warning" @click="unbindAnswer(row.id)">解绑答案</el-button>
-            <el-button v-if="!row.is_deleted" text type="danger" @click="softDelete(row.id)">软删除</el-button>
-            <el-button v-else text type="success" @click="restore(row.id)">恢复</el-button>
+            <div class="paper-table-actions">
+              <RouterLink :to="`/papers/${row.id}`"><el-button text>详情</el-button></RouterLink>
+              <el-button text @click="openEdit(row)">编辑</el-button>
+              <el-button text type="primary" @click="rerun(row.id)">重跑</el-button>
+              <el-button v-if="row.answer_sheet?.has_answer" text type="warning" @click="unbindAnswer(row.id)">解绑答案</el-button>
+              <el-button v-if="!row.is_deleted" text type="danger" @click="softDelete(row.id)">软删除</el-button>
+              <el-button v-else text type="success" @click="restore(row.id)">恢复</el-button>
+            </div>
           </template>
         </el-table-column>
       </el-table>
@@ -265,3 +269,51 @@ onMounted(loadPapers)
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.paper-manage-page,
+.paper-filter-panel,
+.paper-table-panel {
+  min-width: 0;
+}
+
+.paper-filter-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 16px;
+  align-items: end;
+}
+
+.paper-filter-form :deep(.el-form-item) {
+  min-width: 0;
+  margin-bottom: 0;
+}
+
+.paper-filter-form :deep(.el-input),
+.paper-filter-form :deep(.el-input-number) {
+  width: 100%;
+}
+
+.paper-filter-actions :deep(.el-form-item__content) {
+  align-items: flex-end;
+}
+
+.paper-table-panel {
+  overflow-x: auto;
+}
+
+.paper-manage-table {
+  width: 100%;
+}
+
+.paper-table-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  min-width: 0;
+}
+
+.paper-table-actions :deep(.el-button) {
+  margin-left: 0;
+}
+</style>
