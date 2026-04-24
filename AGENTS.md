@@ -84,6 +84,7 @@ Codex 工作文件统一写入项目本地 `.codex/`：
 ## 7. Git 约束
 
 - 可以执行 `git status`、`git diff`、`git add`、`git commit` 等本地操作。
+- 生成 commit message 时必须依据当前 `git diff` / `git diff --stat` 的实际变更范围编写，使用 Conventional Commit 格式；除极小变更外，应包含简洁 subject 和详细 body，body 用要点说明主要改动、行为影响和验证结果。
 - 不主动执行 `git push`，除非用户明确要求。
 - 不使用破坏性命令，例如 `git reset --hard`、`git checkout -- <file>`，除非用户明确要求并确认范围。
 - 不提交无关文件，不回滚用户已有改动。
