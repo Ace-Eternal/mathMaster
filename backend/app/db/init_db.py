@@ -32,7 +32,8 @@ def ensure_sqlite_columns() -> None:
         return
 
     inspector = inspect(engine)
-    if "paper" not in inspector.get_table_names():
+    table_names = inspector.get_table_names()
+    if "paper" not in table_names:
         return
 
     existing_columns = {column["name"] for column in inspector.get_columns("paper")}
@@ -41,12 +42,21 @@ def ensure_sqlite_columns() -> None:
         statements.append("ALTER TABLE paper ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0")
     if "deleted_at" not in existing_columns:
         statements.append("ALTER TABLE paper ADD COLUMN deleted_at DATETIME")
+    if "subject" in existing_columns:
+        statements.append("ALTER TABLE paper DROP COLUMN subject")
 
     chat_session_columns = set()
-    if "chat_session" in inspector.get_table_names():
+    if "chat_session" in table_names:
         chat_session_columns = {column["name"] for column in inspector.get_columns("chat_session")}
         if "selected_model" not in chat_session_columns:
             statements.append("ALTER TABLE chat_session ADD COLUMN selected_model VARCHAR(128)")
+
+    # 旧版数学单科设计遗留 subject 字段，当前模型已统一移除。
+    for table_name in ["knowledge_point", "solution_method"]:
+        if table_name in table_names:
+            table_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            if "subject" in table_columns:
+                statements.append(f"ALTER TABLE {table_name} DROP COLUMN subject")
 
     if not statements:
         return

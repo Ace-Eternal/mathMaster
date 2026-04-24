@@ -2,12 +2,13 @@ import io
 import json
 import zipfile
 
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
 
 from app.api.routes import templates as template_routes
 from app.core.config import settings
 from app.db.base import Base
+from app.db import init_db as init_db_module
 from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
@@ -19,6 +20,43 @@ from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
+
+
+def test_sqlite_startup_drops_legacy_subject_columns(tmp_path, monkeypatch):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'legacy.db'}")
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            """
+            CREATE TABLE paper (
+                id INTEGER PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                subject VARCHAR(64) NOT NULL,
+                paper_pdf_path VARCHAR(1024) NOT NULL,
+                paper_pdf_hash VARCHAR(128) NOT NULL,
+                status VARCHAR(32) NOT NULL
+            )
+            """
+        )
+        connection.exec_driver_sql(
+            """
+            INSERT INTO paper (title, subject, paper_pdf_path, paper_pdf_hash, status)
+            VALUES ('demo', 'math', 'raw/demo.pdf', 'hash', 'RAW')
+            """
+        )
+        connection.exec_driver_sql("CREATE TABLE knowledge_point (id INTEGER PRIMARY KEY, name VARCHAR(255), subject VARCHAR(64) NOT NULL)")
+        connection.exec_driver_sql("CREATE TABLE solution_method (id INTEGER PRIMARY KEY, name VARCHAR(255), subject VARCHAR(64) NOT NULL)")
+
+    monkeypatch.setattr(init_db_module, "engine", engine)
+    monkeypatch.setattr(init_db_module.settings, "database_backend", "sqlite")
+
+    init_db_module.ensure_sqlite_columns()
+
+    inspector = inspect(engine)
+    assert "subject" not in {column["name"] for column in inspector.get_columns("paper")}
+    assert "subject" not in {column["name"] for column in inspector.get_columns("knowledge_point")}
+    assert "subject" not in {column["name"] for column in inspector.get_columns("solution_method")}
+    assert "is_deleted" in {column["name"] for column in inspector.get_columns("paper")}
+    assert "deleted_at" in {column["name"] for column in inspector.get_columns("paper")}
 
 
 def test_local_storage_round_trip(tmp_path):
