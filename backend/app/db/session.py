@@ -11,7 +11,7 @@ engine_kwargs: dict[str, object] = {
     "pool_pre_ping": True,
 }
 if settings.database_backend.lower() == "sqlite":
-    engine_kwargs["connect_args"] = {"check_same_thread": False}
+    engine_kwargs["connect_args"] = {"check_same_thread": False, "timeout": 30}
 
 engine = create_engine(settings.sqlalchemy_database_uri, **engine_kwargs)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False, class_=Session)

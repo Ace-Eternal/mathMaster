@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { api } from '../api/client'
 import TaskOverviewCards from '../components/TaskOverviewCards.vue'
@@ -19,10 +19,14 @@ const loading = ref(false)
 const singleUploadLoading = ref(false)
 const importLoading = ref(false)
 const batchRunning = ref(false)
+const refreshing = ref(false)
 const papers = ref<any[]>([])
 const latestImportItems = ref<ImportItem[]>([])
 const latestImportSummary = ref<any | null>(null)
 const transientTasks = ref<TaskListItem[]>([])
+const runningPaperIds = ref<Set<number>>(new Set())
+let autoRefreshTimer: ReturnType<typeof window.setInterval> | null = null
+const AUTO_REFRESH_INTERVAL_MS = 2500
 
 const uploadForm = ref({
   title: '',
@@ -52,14 +56,48 @@ const errorMessage = (error: any, fallback: string) => {
   return error?.message || fallback
 }
 
-const loadPapers = async () => {
-  loading.value = true
+const loadPapers = async (options: { silent?: boolean } = {}) => {
+  if (refreshing.value) return
+  refreshing.value = true
+  if (!options.silent) loading.value = true
   try {
     const { data } = await api.get('/papers')
     papers.value = data
   } finally {
-    loading.value = false
+    refreshing.value = false
+    if (!options.silent) loading.value = false
   }
+}
+
+const markPaperRunning = (paperId: number) => {
+  runningPaperIds.value = new Set([...runningPaperIds.value, paperId])
+}
+
+const unmarkPaperRunning = (paperId: number) => {
+  const next = new Set(runningPaperIds.value)
+  next.delete(paperId)
+  runningPaperIds.value = next
+}
+
+const isPaperRunning = (paperId: number | null) => Boolean(paperId && runningPaperIds.value.has(paperId))
+
+const hasLiveTasks = computed(() =>
+  taskItems.value.some((item) => ['上传中', 'MineU解析中', '边界识别中', '切题匹配中'].includes(item.stage))
+)
+
+const stopAutoRefresh = () => {
+  if (autoRefreshTimer) {
+    window.clearInterval(autoRefreshTimer)
+    autoRefreshTimer = null
+  }
+}
+
+const startAutoRefresh = () => {
+  if (autoRefreshTimer) return
+  autoRefreshTimer = window.setInterval(() => {
+    loadPapers({ silent: true })
+    if (!hasLiveTasks.value) stopAutoRefresh()
+  }, AUTO_REFRESH_INTERVAL_MS)
 }
 
 const submitSingleUpload = async () => {
@@ -101,6 +139,7 @@ const submitSingleUpload = async () => {
     paperFile.value = null
     answerFile.value = null
     await loadPapers()
+    startAutoRefresh()
   } catch (error: any) {
     const message = errorMessage(error, '上传失败，请重试。')
     persistTransientTask({
@@ -160,6 +199,7 @@ const submitFolderImport = async () => {
     removeTransientTask(transientId)
     ElMessage.success('文件夹导入成功，已完成自动配对。')
     await loadPapers()
+    startAutoRefresh()
   } catch (error: any) {
     const message = errorMessage(error, '文件夹导入失败，请检查文件后重试。')
     persistTransientTask({
@@ -185,7 +225,9 @@ const submitFolderImport = async () => {
 }
 
 const runPipeline = async (paperId: number) => {
+  if (isPaperRunning(paperId)) return
   const paper = papers.value.find((item) => item.id === paperId)
+  markPaperRunning(paperId)
   persistTransientTask({
     id: `run-${paperId}`,
     paperId,
@@ -204,6 +246,7 @@ const runPipeline = async (paperId: number) => {
   })
 
   try {
+    startAutoRefresh()
     await api.post(`/papers/${paperId}/pipeline/run-all`)
     removeTransientTask(`run-${paperId}`)
     ElMessage.success('整理切片完成。')
@@ -227,6 +270,9 @@ const runPipeline = async (paperId: number) => {
       isTransient: true
     })
     ElMessage.error(message)
+  } finally {
+    unmarkPaperRunning(paperId)
+    await loadPapers({ silent: true })
   }
 }
 
@@ -239,6 +285,7 @@ const runImportedBatch = async () => {
 
   batchRunning.value = true
   paperIds.forEach((paperId) => {
+    markPaperRunning(paperId)
     const item = latestImportItems.value.find((entry) => entry.paper_id === paperId)
     persistTransientTask({
       id: `run-${paperId}`,
@@ -259,6 +306,7 @@ const runImportedBatch = async () => {
   })
 
   try {
+    startAutoRefresh()
     await api.post('/papers/batch/run', { paper_ids: paperIds })
     paperIds.forEach((paperId) => removeTransientTask(`run-${paperId}`))
     ElMessage.success('本次导入任务已完成批量整理。')
@@ -287,15 +335,21 @@ const runImportedBatch = async () => {
     ElMessage.error(message)
   } finally {
     batchRunning.value = false
+    paperIds.forEach((paperId) => unmarkPaperRunning(paperId))
+    await loadPapers({ silent: true })
   }
 }
 
 const taskItems = computed(() => {
   const paperTasks = papers.value.map((paper) => deriveTaskFromPaper(paper))
-  const withoutShadowedTransient = transientTasks.value.filter(
-    (task) => !task.paperId || !paperTasks.some((paperTask) => paperTask.paperId === task.paperId)
+  const transientByPaperId = new Map(
+    transientTasks.value
+      .filter((task) => task.paperId)
+      .map((task) => [task.paperId, task])
   )
-  return sortTaskItems([...withoutShadowedTransient, ...paperTasks])
+  const mergedPaperTasks = paperTasks.map((paperTask) => transientByPaperId.get(paperTask.paperId) || paperTask)
+  const unboundTransient = transientTasks.value.filter((task) => !task.paperId)
+  return sortTaskItems([...unboundTransient, ...mergedPaperTasks])
 })
 
 const summary = computed(() => summarizeTasks(taskItems.value))
@@ -324,7 +378,13 @@ const recentReview = computed(() => {
   }
 })
 
-onMounted(loadPapers)
+watch(hasLiveTasks, (active) => {
+  if (active) startAutoRefresh()
+  else stopAutoRefresh()
+})
+
+onMounted(() => loadPapers())
+onBeforeUnmount(stopAutoRefresh)
 </script>
 
 <template>
@@ -541,7 +601,16 @@ onMounted(loadPapers)
             <div v-for="item in queuedTasks" :key="`queued-${item.id}`" class="focus-inline-item">
               <strong>{{ item.title }}</strong>
               <span class="muted">尚未执行 MineU 流程</span>
-              <el-button v-if="item.paperId" text type="primary" @click="runPipeline(item.paperId)">立即运行</el-button>
+              <el-button
+                v-if="item.paperId"
+                text
+                type="primary"
+                :loading="isPaperRunning(item.paperId)"
+                :disabled="isPaperRunning(item.paperId)"
+                @click="runPipeline(item.paperId)"
+              >
+                立即运行
+              </el-button>
             </div>
           </div>
         </template>
@@ -550,7 +619,7 @@ onMounted(loadPapers)
     </section>
 
     <TaskOverviewCards :summary="summary" />
-    <TaskStatusList :items="taskItems" :loading="loading" @rerun="runPipeline" />
+    <TaskStatusList :items="taskItems" :loading="loading" :running-paper-ids="runningPaperIds" @rerun="runPipeline" />
   </div>
 </template>
 

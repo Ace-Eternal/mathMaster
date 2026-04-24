@@ -1,6 +1,7 @@
 import io
 import json
 import zipfile
+from pathlib import Path
 
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session
@@ -10,7 +11,7 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db import init_db as init_db_module
 from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
-from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
+from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest, ReviewUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
@@ -20,6 +21,28 @@ from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
+
+
+PROMPT_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "prompts"
+
+
+def test_llm_prompts_pin_project_output_contracts():
+    slice_prompt = (PROMPT_DIR / "slice_prompt.md").read_text(encoding="utf-8")
+    paper_boundary_prompt = (PROMPT_DIR / "full_paper_boundary_prompt.md").read_text(encoding="utf-8")
+    answer_boundary_prompt = (PROMPT_DIR / "full_answer_boundary_prompt.md").read_text(encoding="utf-8")
+
+    assert "字段名错误会导致任务失败" in slice_prompt
+    assert "不要输出 `answer_candidate_id`" in slice_prompt
+    assert "不要把结果包在 `items`" in slice_prompt
+    assert '"matched_answer_candidate_id"' in slice_prompt
+
+    assert "不要输出 `sections`、`questions`、`boundaries`" in paper_boundary_prompt
+    assert "每个题目对象必须且只能包含示例中的 9 个字段" in paper_boundary_prompt
+    assert '"question_no"' in paper_boundary_prompt
+
+    assert "不要输出 `answers`、`sections`、`solutions`" in answer_boundary_prompt
+    assert "每个答案对象必须且只能包含示例中的 8 个字段" in answer_boundary_prompt
+    assert '"answer_question_no"' in answer_boundary_prompt
 
 
 def test_sqlite_startup_drops_legacy_subject_columns(tmp_path, monkeypatch):
@@ -805,6 +828,40 @@ def test_review_service_maintains_clean_review_state_without_analysis_record(tmp
         assert payload.review_status == "APPROVED"
         assert payload.review_note is None
         assert payload.answer.match_confidence >= 0.93
+
+
+def test_review_service_marks_paper_sliced_when_no_pending_questions(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(base_dir=str(tmp_path))
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash", status="REVIEW_PENDING")
+        db.add(paper)
+        db.flush()
+        question = Question(
+            paper_id=paper.id,
+            question_no="1",
+            stem_text="1. 已知函数，求最值。",
+            page_start=1,
+            review_status="PENDING",
+        )
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="答案", match_status="AUTO_MATCHED", match_confidence=0.9))
+        db.commit()
+
+        service = ReviewService(db, storage)
+        service.update_question(
+            question.id,
+            ReviewUpdateRequest(
+                stem_text="1. 已知函数，求最值。",
+                answer_text="答案",
+                review_status="APPROVED",
+                review_type="MANUAL_REVIEW",
+            ),
+        )
+
+        assert db.get(Paper, paper.id).status == "SLICED"
 
 
 def test_review_service_create_update_delete_question_syncs_slice_files_and_relations(tmp_path):

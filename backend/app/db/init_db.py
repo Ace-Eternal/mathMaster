@@ -66,7 +66,18 @@ def ensure_sqlite_columns() -> None:
             connection.execute(text(stmt))
 
 
+def configure_sqlite_runtime() -> None:
+    if settings.database_backend.lower() != "sqlite":
+        return
+
+    with engine.begin() as connection:
+        # 本地开发常有页面轮询与长任务并发读写，WAL 可减少读请求阻塞写入。
+        connection.execute(text("PRAGMA journal_mode=WAL"))
+        connection.execute(text("PRAGMA busy_timeout=30000"))
+
+
 def init_db() -> None:
     ensure_data_dirs()
+    configure_sqlite_runtime()
     Base.metadata.create_all(bind=engine)
     ensure_sqlite_columns()

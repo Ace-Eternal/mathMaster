@@ -47,6 +47,10 @@ class ReviewService:
         for question in questions:
             if self._maintain_single_question_review_state(question, duplicate_keys=duplicate_keys):
                 updated += 1
+        touched_paper_ids = {question.paper_id for question in questions}
+        for paper_id in touched_paper_ids:
+            if self._sync_paper_review_status(paper_id):
+                updated += 1
         if updated:
             self.db.commit()
         return updated
@@ -78,6 +82,7 @@ class ReviewService:
         self.db.flush()
 
         self._sync_paper_question_files(paper.id)
+        self._sync_paper_review_status(paper.id)
         self.db.commit()
         return self._load_question(question.id)
 
@@ -136,6 +141,7 @@ class ReviewService:
         self.db.add(review)
         self.db.flush()
         self._sync_paper_question_files(question.paper_id)
+        self._sync_paper_review_status(question.paper_id)
         self.db.commit()
         return self._load_question(question.id)
 
@@ -179,6 +185,7 @@ class ReviewService:
         self.db.delete(question)
         self.db.flush()
         self._sync_paper_question_files(paper_id, extra_cleanup_paths=cleanup_paths)
+        self._sync_paper_review_status(paper_id)
         self.db.commit()
 
     def review_queue(
@@ -349,6 +356,24 @@ class ReviewService:
             if path and path not in new_paths and self.storage.exists(path):
                 self.storage.delete_file(path)
         self.db.flush()
+
+    def _sync_paper_review_status(self, paper_id: int) -> bool:
+        paper = self._get_paper(paper_id)
+        pending_count = self.db.execute(
+            select(func.count(Question.id)).where(
+                Question.paper_id == paper_id,
+                Question.review_status == "PENDING",
+            )
+        ).scalar_one()
+        if paper.status == "REVIEW_PENDING" and pending_count == 0:
+            paper.status = "SLICED"
+            self.db.add(paper)
+            return True
+        if paper.status == "SLICED" and pending_count > 0:
+            paper.status = "REVIEW_PENDING"
+            self.db.add(paper)
+            return True
+        return False
 
     def _maintain_single_question_review_state(
         self,

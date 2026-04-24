@@ -7,6 +7,7 @@ import type { TaskListItem } from '../utils/paperStatus'
 defineProps<{
   items: TaskListItem[]
   loading?: boolean
+  runningPaperIds?: Set<number>
 }>()
 
 const emit = defineEmits<{
@@ -92,6 +93,8 @@ const formatTime = (value: string | null) => {
               v-if="row.paperId && !row.isTransient"
               text
               type="primary"
+              :loading="runningPaperIds?.has(row.paperId)"
+              :disabled="runningPaperIds?.has(row.paperId)"
               @click="emit('rerun', row.paperId)"
             >
               重新运行

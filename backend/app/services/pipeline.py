@@ -1679,13 +1679,25 @@ class PaperPipelineService:
         return papers
 
     def _decorate_papers(self, papers: list[Paper]) -> None:
+        status_changed = False
         for paper in papers:
             paper.questions = sorted(
                 paper.questions,
                 key=lambda question: (question_no_sort_key(question.question_no), question.id),
             )
-            setattr(paper, "pending_review_count", sum(1 for question in paper.questions if question.review_status == "PENDING"))
+            pending_review_count = sum(1 for question in paper.questions if question.review_status == "PENDING")
+            setattr(paper, "pending_review_count", pending_review_count)
+            if paper.status == "REVIEW_PENDING" and pending_review_count == 0:
+                paper.status = "SLICED"
+                self.db.add(paper)
+                status_changed = True
+            elif paper.status == "SLICED" and pending_review_count > 0:
+                paper.status = "REVIEW_PENDING"
+                self.db.add(paper)
+                status_changed = True
             latest_error = next((job.error_message for job in reversed(paper.conversion_jobs) if job.error_message), None)
             setattr(paper, "latest_error_message", latest_error)
             timestamps = [job.updated_at for job in paper.conversion_jobs if job.updated_at]
             setattr(paper, "last_pipeline_at", max(timestamps) if timestamps else None)
+        if status_changed:
+            self.db.commit()

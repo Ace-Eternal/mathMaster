@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
+import threading
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
+from app.db.session import SessionLocal
 from app.db.session import get_db
 from app.schemas.paper import (
     BatchRunRequest,
@@ -23,6 +26,7 @@ from app.services.review import ReviewService
 from app.services.storage.factory import get_storage_service
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 
 
 def get_pipeline_service(db: Session) -> PaperPipelineService:
@@ -33,6 +37,29 @@ def get_pipeline_service(db: Session) -> PaperPipelineService:
         slice_service=SliceService(),
         match_service=MatchService(LLMGateway()),
     )
+
+
+def build_pipeline_response(paper) -> PipelineRunResponse:
+    return PipelineRunResponse(
+        paper_id=paper.id,
+        paper_status=paper.status,
+        jobs=paper.conversion_jobs,
+        question_count=len(paper.questions),
+        questions=paper.questions,
+    )
+
+
+def run_pipeline_background(paper_id: int) -> None:
+    with SessionLocal() as db:
+        try:
+            get_pipeline_service(db).run_pipeline(paper_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("Background pipeline failed for paper %s", paper_id)
+
+
+def start_pipeline_worker(paper_id: int) -> None:
+    worker = threading.Thread(target=run_pipeline_background, args=(paper_id,), daemon=True)
+    worker.start()
 
 
 @router.get("", response_model=list[PaperResponse])
@@ -124,17 +151,11 @@ def get_import_job(import_job_id: int, db: Session = Depends(get_db)):
 
 @router.post("/batch/run", response_model=list[PipelineRunResponse])
 def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
-    papers = get_pipeline_service(db).batch_run_pipeline(payload.paper_ids)
-    return [
-        PipelineRunResponse(
-            paper_id=paper.id,
-            paper_status=paper.status,
-            jobs=paper.conversion_jobs,
-            question_count=len(paper.questions),
-            questions=paper.questions,
-        )
-        for paper in papers
-    ]
+    service = get_pipeline_service(db)
+    papers = [service.get_paper(paper_id) for paper_id in payload.paper_ids]
+    for paper in papers:
+        start_pipeline_worker(paper.id)
+    return [build_pipeline_response(paper) for paper in papers]
 
 
 @router.patch("/{paper_id}", response_model=PaperResponse)
@@ -190,14 +211,9 @@ def unbind_answer(paper_id: int, db: Session = Depends(get_db)):
 @router.post("/{paper_id}/pipeline/run", response_model=PipelineRunResponse)
 @router.post("/{paper_id}/pipeline/run-all", response_model=PipelineRunResponse)
 def run_pipeline(paper_id: int, db: Session = Depends(get_db)):
-    paper = get_pipeline_service(db).run_pipeline(paper_id)
-    return PipelineRunResponse(
-        paper_id=paper.id,
-        paper_status=paper.status,
-        jobs=paper.conversion_jobs,
-        question_count=len(paper.questions),
-        questions=paper.questions,
-    )
+    paper = get_pipeline_service(db).get_paper(paper_id)
+    start_pipeline_worker(paper.id)
+    return build_pipeline_response(paper)
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)

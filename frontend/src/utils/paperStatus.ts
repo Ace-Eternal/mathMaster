@@ -146,9 +146,15 @@ export const deriveTaskFromPaper = (paper: PaperLike): TaskListItem => {
     progress = 52
     note = 'MineU 已完成，但尚未进入 LLM 边界识别。'
   } else if (paperStatus === 'REVIEW_PENDING') {
-    stage = '待人工审核'
-    progress = 92
-    note = pendingReviewCount ? `当前有 ${pendingReviewCount} 道题需要人工确认。` : '系统建议人工复核后再继续。'
+    if (pendingReviewCount > 0) {
+      stage = '待人工审核'
+      progress = 92
+      note = `当前有 ${pendingReviewCount} 道题需要人工确认。`
+    } else {
+      stage = '已完成'
+      progress = 100
+      note = questionCount ? `已生成 ${questionCount} 道题，待审核项已全部处理。` : '流程已完成。'
+    }
   } else if (paperStatus === 'SLICED' || paperStatus === 'REVIEWED' || paperStatus === 'ARCHIVED') {
     stage = '已完成'
     progress = 100
