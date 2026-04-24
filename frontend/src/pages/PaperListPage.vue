@@ -605,10 +605,18 @@ onBeforeUnmount(stopAutoRefresh)
           </div>
 
           <el-form-item label="试卷 PDF">
-            <input type="file" accept=".pdf,application/pdf" @change="paperFile = ($event.target as HTMLInputElement).files?.[0] || null" />
+            <label class="file-picker">
+              <input class="file-picker__input" type="file" accept=".pdf,application/pdf" @change="paperFile = ($event.target as HTMLInputElement).files?.[0] || null" />
+              <span class="file-picker__button">选择试卷</span>
+              <span class="file-picker__text">{{ paperFile?.name || '未选择 PDF 文件' }}</span>
+            </label>
           </el-form-item>
           <el-form-item label="答案 PDF">
-            <input type="file" accept=".pdf,application/pdf" @change="answerFile = ($event.target as HTMLInputElement).files?.[0] || null" />
+            <label class="file-picker">
+              <input class="file-picker__input" type="file" accept=".pdf,application/pdf" @change="answerFile = ($event.target as HTMLInputElement).files?.[0] || null" />
+              <span class="file-picker__button">选择答案</span>
+              <span class="file-picker__text">{{ answerFile?.name || '可选，未选择答案文件' }}</span>
+            </label>
           </el-form-item>
 
           <div class="action-row">
@@ -627,25 +635,35 @@ onBeforeUnmount(stopAutoRefresh)
 
         <el-form label-position="top">
           <el-form-item label="试卷文件夹">
-            <input
-              type="file"
-              multiple
-              webkitdirectory
-              directory
-              accept=".pdf,application/pdf"
-              @change="folderPaperFiles = Array.from(($event.target as HTMLInputElement).files || [])"
-            />
+            <label class="file-picker file-picker--folder">
+              <input
+                class="file-picker__input"
+                type="file"
+                multiple
+                webkitdirectory
+                directory
+                accept=".pdf,application/pdf"
+                @change="folderPaperFiles = Array.from(($event.target as HTMLInputElement).files || [])"
+              />
+              <span class="file-picker__button">选择试卷文件夹</span>
+              <span class="file-picker__text">{{ folderPaperFiles.length ? `已选择 ${folderPaperFiles.length} 份试卷` : '未选择试卷文件夹' }}</span>
+            </label>
           </el-form-item>
 
           <el-form-item label="答案文件夹">
-            <input
-              type="file"
-              multiple
-              webkitdirectory
-              directory
-              accept=".pdf,application/pdf"
-              @change="folderAnswerFiles = Array.from(($event.target as HTMLInputElement).files || [])"
-            />
+            <label class="file-picker file-picker--folder">
+              <input
+                class="file-picker__input"
+                type="file"
+                multiple
+                webkitdirectory
+                directory
+                accept=".pdf,application/pdf"
+                @change="folderAnswerFiles = Array.from(($event.target as HTMLInputElement).files || [])"
+              />
+              <span class="file-picker__button">选择答案文件夹</span>
+              <span class="file-picker__text">{{ folderAnswerFiles.length ? `已选择 ${folderAnswerFiles.length} 份答案` : '可选，未选择答案文件夹' }}</span>
+            </label>
           </el-form-item>
 
           <div class="surface-note">
@@ -778,6 +796,62 @@ input[type='file'] {
   background: rgba(247, 249, 252, 0.78);
   padding: 14px;
   color: var(--mm-text-soft);
+}
+
+.file-picker {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  min-height: 54px;
+  border: 1px dashed var(--mm-border-strong);
+  border-radius: 14px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.92), rgba(247, 249, 252, 0.86));
+  padding: 10px;
+  cursor: pointer;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease;
+}
+
+.file-picker:hover {
+  border-color: rgba(63, 109, 246, 0.55);
+  box-shadow: 0 10px 24px rgba(63, 109, 246, 0.09);
+  transform: translateY(-1px);
+}
+
+.file-picker__input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.file-picker__button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  border-radius: 10px;
+  padding: 0 14px;
+  background: var(--mm-primary);
+  color: white;
+  font-size: 13px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.file-picker__text {
+  min-width: 0;
+  color: var(--mm-text-soft);
+  font-size: 13px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-picker--folder .file-picker__button {
+  background: #0f766e;
 }
 
 .resume-title {

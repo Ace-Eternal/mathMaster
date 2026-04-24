@@ -152,14 +152,18 @@ class AnswerSliceDraft:
 
 def normalize_pair_key(filename: str) -> str:
     stem = Path(filename).stem.lower()
-    if "-" in stem:
-        stem = stem.split("-", 1)[1]
     normalized = (
         stem.replace("_", "-")
         .replace("（", "(")
         .replace("）", ")")
         .replace(" ", "")
     )
+    normalized = re.sub(r"[-—–]+", "-", normalized).strip("-")
+    if "-" in normalized:
+        prefix, suffix = normalized.split("-", 1)
+        if prefix in {"数学卷", "数学试卷", "试卷", "paper", "数学答案", "答案", "answer", "ans"}:
+            normalized = suffix
+    normalized = re.sub(r"^(?:数学试卷|数学卷|试卷|paper|数学答案|答案|answer|ans)", "", normalized)
     normalized = re.sub(r"[-—–]+", "-", normalized).strip("-")
     return normalized or stem
 

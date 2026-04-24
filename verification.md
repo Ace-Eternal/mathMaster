@@ -82,3 +82,10 @@
 - 数据库压缩：执行 `PRAGMA wal_checkpoint(TRUNCATE)` 与 `VACUUM`，`mathmaster.db` 从 503,808 bytes 降到 299,008 bytes，WAL 清空为 0 bytes。
 - 复核：`/api/papers/manage` 返回 2 条：`数学卷-2506丽水高一期末` 与 `数学卷-2506宁波三峰高一期末`。
 - 复核：`data/raw` 仅剩 2 份试卷 PDF 和 2 份答案 PDF；`data/mineu` 仅剩 `28`、`29`；`data/slices` 仅剩 `28`、`29`。
+
+## 2026-04-24 17:36:00 +08:00 - 文件夹导入配对归一化验证
+
+- 执行者：Codex
+- 根因：`normalize_pair_key()` 只按短横线 `-` 截取后缀，未处理下划线 `_` 和 `数学卷` / `数学答案` 前缀，导致 `数学卷_2504高一山海协作体` 与 `数学答案_2504高一山海协作体` 被归为不同 key。
+- 修复：先统一 `_`、破折号和空格，再剥离 `数学卷`、`数学试卷`、`数学答案`、`答案` 等前缀。
+- 后端测试：`cd backend; uv run pytest`，56 passed。

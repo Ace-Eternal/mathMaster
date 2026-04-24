@@ -468,6 +468,12 @@ def test_pair_key_normalization_matches_math_volume_and_answer():
     )
 
 
+def test_pair_key_normalization_matches_underscore_math_volume_and_answer():
+    assert normalize_pair_key("paper_pdfs/数学卷_2504高一山海协作体.pdf") == normalize_pair_key(
+        "ans_pdfs/数学答案_2504高一山海协作体.pdf"
+    )
+
+
 def test_pair_key_normalization_uses_suffix_after_first_dash():
     assert normalize_pair_key("paper_pdfs/数学试卷-校内版-2506联考.pdf") == "校内版-2506联考"
 
