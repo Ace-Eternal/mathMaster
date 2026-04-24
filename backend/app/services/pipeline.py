@@ -32,12 +32,12 @@ from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.review_state import (
-    MATCH_AUTO_APPROVE_CONFIDENCE,
     SAME_NUMBER_FALLBACK_NOTE,
     has_complete_stem,
     is_structurally_safe_for_auto_review,
 )
 from app.services.storage.base import FileStorageService
+from app.utils.answers import normalize_answer_text_for_markdown
 from app.utils.files import build_storage_key, json_dumps, random_prefixed_name, sha256_bytes
 
 
@@ -758,22 +758,6 @@ class SliceService:
             text_only_candidate = bool(item.get("text_only_candidate"))
             start_index = self._to_int(item.get("start_block_index"))
             end_index = self._to_int(item.get("end_block_index"))
-            if text_only_candidate and item.get("llm_text"):
-                boundaries.append(
-                    AnswerBoundaryItem(
-                        candidate_id=f"answer-{index}",
-                        answer_question_no=str(item.get("answer_question_no") or item.get("question_no") or index).strip() or str(index),
-                        start_block_index=-1,
-                        end_block_index=-1,
-                        page_start=self._to_int(item.get("page_start")),
-                        page_end=self._to_int(item.get("page_end")),
-                        has_sub_questions=bool(item.get("has_sub_questions")),
-                        need_manual_review=bool(item.get("need_manual_review")),
-                        review_reason=str(item.get("review_reason") or "").strip() or None,
-                        llm_text=str(item.get("llm_text") or "").strip() or None,
-                    )
-                )
-                continue
             if start_index is None or end_index is None:
                 resolved_range = self._resolve_range_from_question_no(
                     blocks=blocks,
@@ -781,7 +765,16 @@ class SliceService:
                 )
                 if resolved_range:
                     start_index, end_index = resolved_range
+                    if text_only_candidate:
+                        selected = self._blocks_in_range(blocks, start_index, end_index)
+                        if self._is_multi_answer_summary_block(
+                            selected[0].text if selected else "",
+                            str(item.get("answer_question_no") or item.get("question_no") or ""),
+                        ) or self._is_score_only_answer_block(selected[0].text if selected else ""):
+                            start_index, end_index = None, None
             if start_index is None or end_index is None:
+                if text_only_candidate and not item.get("llm_text"):
+                    continue
                 boundaries.append(
                     AnswerBoundaryItem(
                         candidate_id=f"answer-{index}",
@@ -822,6 +815,15 @@ class SliceService:
                 )
             )
         return boundaries
+
+    @staticmethod
+    def _is_multi_answer_summary_block(text: str, question_no: str) -> bool:
+        marker_numbers = re.findall(r"(?:^|\s)(\d+)\s*[题、.．)]", text)
+        return any(number != question_no for number in marker_numbers)
+
+    @staticmethod
+    def _is_score_only_answer_block(text: str) -> bool:
+        return bool(re.fullmatch(r"\s*\d+\s*分\s*", text))
 
     def _resolve_range_from_question_no(self, *, blocks: list[NormalizedBlock], question_no: str) -> tuple[int, int] | None:
         if not question_no:
@@ -977,7 +979,7 @@ class MatchService:
                 matched_answer = exact_candidate
                 matched_answer_id = exact_candidate.candidate_id
                 if can_auto_pass_same_no:
-                    confidence = max(confidence, MATCH_AUTO_APPROVE_CONFIDENCE)
+                    confidence = max(confidence, 0.72)
                     needs_review = False
                     review_reason = None
                 else:
@@ -1003,7 +1005,7 @@ class MatchService:
             matched_answer = exact_candidate
             matched_answer_id = exact_candidate.candidate_id
             if can_auto_pass_same_no:
-                confidence = max(confidence, MATCH_AUTO_APPROVE_CONFIDENCE)
+                confidence = max(confidence, 0.72)
                 needs_review = False
                 review_reason = None
             else:
@@ -1643,9 +1645,10 @@ class PaperPipelineService:
             self.db.flush()
 
             matched_answer = refined.get("matched_answer")
+            matched_answer_text = normalize_answer_text_for_markdown(matched_answer.stem_text) if matched_answer else None
             answer = QuestionAnswer(
                 question_id=question.id,
-                answer_text=matched_answer.stem_text.strip() if matched_answer else None,
+                answer_text=matched_answer_text.strip() if matched_answer_text else None,
                 answer_md_path=build_storage_key(q_prefix, filename="answer.md") if matched_answer else None,
                 answer_json_path=build_storage_key(q_prefix, filename="answer.json") if matched_answer else None,
                 match_confidence=round(float(refined.get("match_confidence") or 0.0), 4),
@@ -1655,8 +1658,9 @@ class PaperPipelineService:
                 answer_payload = {
                     **matched_answer.json_fragment,
                     "image_blocks": matched_answer.image_blocks,
+                    "merged_text": answer.answer_text,
                 }
-                self.storage.save_file(matched_answer.stem_text.encode("utf-8"), answer.answer_md_path)
+                self.storage.save_file((answer.answer_text or "").encode("utf-8"), answer.answer_md_path)
                 self.storage.save_file(json_dumps(answer_payload), answer.answer_json_path)
             self.db.add(answer)
             created_question_ids.append(question.id)

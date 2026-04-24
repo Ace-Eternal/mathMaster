@@ -272,7 +272,7 @@ class LLMGateway:
 
     def _normalize_boundary_result(self, *, scenario: str, result: dict[str, Any]) -> dict[str, Any]:
         items = result.get("items")
-        if not isinstance(items, list):
+        if not isinstance(items, list) and scenario != "full_answer_boundary":
             items = result.get("boundaries")
         if not isinstance(items, list) and scenario == "full_paper_boundary":
             section_items: list[dict[str, Any]] = []
@@ -297,29 +297,8 @@ class LLMGateway:
                         }
                     )
             items = section_items
-        if not isinstance(items, list) and scenario == "full_answer_boundary":
-            answer_map = result.get("answers") or {}
-            if isinstance(answer_map, dict):
-                answer_items: list[dict[str, Any]] = []
-                for answer_no, answer_value in self._iter_answer_entries(answer_map):
-                    answer_text = self._stringify_answer_value(answer_value)
-                    if not answer_text:
-                        continue
-                    answer_items.append(
-                        {
-                            "answer_question_no": str(answer_no),
-                            "start_block_index": None,
-                            "end_block_index": None,
-                            "page_start": None,
-                            "page_end": None,
-                            "has_sub_questions": "（1）" in answer_text or "(1)" in answer_text,
-                            "need_manual_review": False,
-                            "review_reason": None,
-                            "llm_text": answer_text or None,
-                            "text_only_candidate": True,
-                        }
-                    )
-                items = answer_items
+        if scenario == "full_answer_boundary":
+            self._validate_answer_boundary_contract(result=result, items=items)
         if not isinstance(items, list):
             items = []
         normalized_items: list[dict[str, Any]] = []
@@ -347,6 +326,43 @@ class LLMGateway:
         if normalized_items != items:
             normalized["_fallback_notice"] = "已将 PackyAPI 返回边界结果归一化为项目字段。"
         return normalized
+
+    @staticmethod
+    def _validate_answer_boundary_contract(*, result: dict[str, Any], items: object) -> None:
+        if not isinstance(items, list):
+            provided_keys = ", ".join(sorted(result.keys())) or "none"
+            raise ValueError(
+                "full_answer_boundary must return an object with items array only; "
+                f"got keys: {provided_keys}"
+            )
+        required_keys = {
+            "answer_question_no",
+            "start_block_index",
+            "end_block_index",
+            "page_start",
+            "page_end",
+            "has_sub_questions",
+            "need_manual_review",
+            "review_reason",
+        }
+        for index, item in enumerate(items, start=1):
+            if not isinstance(item, dict):
+                raise ValueError(f"full_answer_boundary items[{index}] must be an object")
+            item_keys = set(item.keys())
+            if item_keys != required_keys:
+                missing = sorted(required_keys - item_keys)
+                extra = sorted(item_keys - required_keys)
+                details: list[str] = []
+                if missing:
+                    details.append(f"missing: {', '.join(missing)}")
+                if extra:
+                    details.append(f"extra: {', '.join(extra)}")
+                raise ValueError(f"full_answer_boundary items[{index}] schema mismatch ({'; '.join(details)})")
+            if item.get("start_block_index") is None or item.get("end_block_index") is None:
+                raise ValueError(
+                    f"full_answer_boundary items[{index}] requires non-null "
+                    "start_block_index and end_block_index"
+                )
 
     @staticmethod
     def _map_external_question_type(question_type: str) -> str:

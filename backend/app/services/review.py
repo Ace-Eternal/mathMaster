@@ -11,7 +11,6 @@ from slugify import slugify
 from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnalysis, QuestionAnswer, QuestionKnowledge, QuestionMethod, ReviewRecord
 from app.schemas.question import QuestionCreateRequest, QuestionDetailResponse, QuestionUpdateRequest, ReviewQueueItem, ReviewUpdateRequest
 from app.services.review_state import (
-    MATCH_AUTO_APPROVE_CONFIDENCE,
     is_analysis_failure_note,
     is_low_confidence_note,
     is_same_number_fallback_note,
@@ -20,6 +19,7 @@ from app.services.review_state import (
     split_review_notes,
 )
 from app.services.storage.base import FileStorageService
+from app.utils.answers import normalize_answer_text_for_markdown
 from app.utils.files import build_storage_key, json_dumps
 
 
@@ -70,7 +70,7 @@ class ReviewService:
         self.db.add(question)
         self.db.flush()
 
-        answer_text = (payload.answer_text or "").strip()
+        answer_text = (normalize_answer_text_for_markdown(payload.answer_text) or "").strip()
         if answer_text:
             answer = QuestionAnswer(
                 question_id=question.id,
@@ -114,7 +114,7 @@ class ReviewService:
         question.review_status = payload.review_status
 
         if payload.answer_text is not None:
-            answer_text = payload.answer_text.strip()
+            answer_text = (normalize_answer_text_for_markdown(payload.answer_text) or "").strip()
             if answer_text:
                 if question.answer is None:
                     question.answer = QuestionAnswer(question_id=question.id, match_status="MANUAL_FIXED", match_confidence=1.0)
@@ -383,12 +383,6 @@ class ReviewService:
     ) -> bool:
         original_note = question.review_note
         original_status = question.review_status
-        original_confidence = (
-            float(question.answer.match_confidence)
-            if question.answer and question.answer.match_confidence is not None
-            else None
-        )
-
         actionable_notes: list[str] = []
         match_noise_notes: list[str] = []
         for note in split_review_notes(question.review_note):
@@ -409,31 +403,9 @@ class ReviewService:
         question.review_note = join_review_notes(actionable_notes if can_auto_approve else [*actionable_notes, *match_noise_notes])
         if can_auto_approve and question.review_status == "PENDING":
             question.review_status = "APPROVED"
-        if (
-            can_auto_approve
-            and question.answer is not None
-            and (
-                question.answer.match_confidence is None
-                or float(question.answer.match_confidence) < MATCH_AUTO_APPROVE_CONFIDENCE
-            )
-        ):
-            question.answer.match_confidence = MATCH_AUTO_APPROVE_CONFIDENCE
-            self.db.add(question.answer)
-
         changed = (
             original_note != question.review_note
             or original_status != question.review_status
-            or (
-                question.answer is not None
-                and (
-                    original_confidence
-                    != (
-                        float(question.answer.match_confidence)
-                        if question.answer.match_confidence is not None
-                        else None
-                    )
-                )
-            )
         )
         if changed:
             self.db.add(question)

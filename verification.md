@@ -89,3 +89,52 @@
 - 根因：`normalize_pair_key()` 只按短横线 `-` 截取后缀，未处理下划线 `_` 和 `数学卷` / `数学答案` 前缀，导致 `数学卷_2504高一山海协作体` 与 `数学答案_2504高一山海协作体` 被归为不同 key。
 - 修复：先统一 `_`、破折号和空格，再剥离 `数学卷`、`数学试卷`、`数学答案`、`答案` 等前缀。
 - 后端测试：`cd backend; uv run pytest`，56 passed。
+
+## 2026-04-24 19:06:00 +08:00 - 审核页答案完整性与渲染验证
+
+- 执行者：Codex
+- 根因：答案边界归一化遇到 PackyAPI `answers` 结构时会生成 `text_only_candidate`，原实现优先使用 LLM 摘要文本，导致可从 MineU 原始块定位的解答题也只保留结论摘要。
+- 修复：`text_only_candidate` 先尝试按题号回到原答案 OCR 块；仅当命中的是多题同块摘要或分值块时才使用 LLM 文本。
+- 根因：审核状态维护会把结构完整、可自动通过的题目 `match_confidence` 统一抬到 `0.93`；同题号自动兜底匹配也会抬到同一值。
+- 修复：自动通过不再改写历史匹配置信度；同题号兜底使用较低的确定性兜底分，避免整队列显示同一个 0.93。
+- 前端修复：`/review` 移除“包含已删除”，筛选按钮与下拉框底部对齐；答案 Markdown 渲染会把裸 TeX 关系符号转换为可读数学符号。
+- 数据修复：已从 `data/mineu/28/answer.*` 恢复 `/review/109` 的完整第 17 题答案到 `data/slices/28/q_017/answer.*` 与本地 SQLite。
+- 验证：后端完整测试 `uv run pytest`，57 passed；前端构建 `npm run build`，通过。
+
+## 2026-04-24 19:24:00 +08:00 - 答案边界严格契约验证
+
+- 执行者：Codex
+- 修复：`full_answer_boundary` 不再接受 `answers`、`boundaries` 等替代结构；必须返回 `items` 数组。
+- 修复：`full_answer_boundary.items[*]` 必须严格包含 `answer_question_no`、`start_block_index`、`end_block_index`、`page_start`、`page_end`、`has_sub_questions`、`need_manual_review`、`review_reason` 这 8 个字段，且起止 block 不能为空。
+- 行为：主模型若返回旧的 `answers` map 或缺少 block 边界，归一化阶段抛出错误，外层结构化调用会按现有机制尝试备用模型；备用模型仍不合规则答案边界识别失败，不再静默落库摘要答案。
+- 验证：针对性测试 `uv run pytest tests/test_storage_and_slice.py -k "full_answer_boundary_normalization"`，2 passed；后端完整测试 `uv run pytest`，58 passed。
+
+## 2026-04-24 19:42:00 +08:00 - Markdown 数学规范化加固验证
+
+- 执行者：Codex
+- 修复：Markdown 数学规范化支持行内/块级 `\[...\]`、全角 `＄...＄`、裸 `\frac`、`\sqrt`、`\sin \angle ...` 等常见 OCR/LLM 输出。
+- 修复：非数学片段中常见 TeX 关系符号转为可读符号，包括平行、垂直、集合包含/不包含、交并、大小比较、无穷、角、三角形、因此/因为等。
+- 修复：处理 OCR 常见的 `/ /` 与 `//` 平行符号。
+- 验证：新增 `npm run check:markdown-math`，覆盖 6 个常见失败输入；前端构建 `npm run build` 通过。
+
+## 2026-04-24 19:55:00 +08:00 - JSON 答案 Map 渲染验证
+
+- 执行者：Codex
+- 根因：`/review/88` 的答案文本是 JSON 对象字符串，例如 `{"1":"...","2":"..."}`，原 Markdown 渲染器会把它当普通文本处理，后续裸 TeX 包装还会把整段弄乱。
+- 修复：`normalizeMathContent()` 在数学规范化前识别纯 JSON answer map，转成 `1. ...`、`2. ...` 的可读 Markdown；当值主要是 TeX 数学表达式时整段包为 inline math。
+- 验证：`npm run check:markdown-math` 扩展到 7 个用例并通过；`npm run build` 通过。
+
+## 2026-04-24 20:08:00 +08:00 - 答案文本入库规范化验证
+
+- 执行者：Codex
+- 根因：前端预览层规范化只能修“当前答案渲染效果”，但“答案原始文本”来自数据库 `question_answer.answer_text`，历史和未来入库若保存 JSON map 仍会原样显示。
+- 修复：新增后端 `normalize_answer_text_for_markdown()`，在流水线自动匹配落库、人工新增/编辑答案时，将纯 JSON answer map 转为编号 Markdown。
+- 数据修复：已迁移 `/review/88` 当前本地记录，`question_answer.answer_text`、`data/slices/29/q_015/answer.md`、`answer.json.merged_text/llm_text` 均为 Markdown。
+- 验证：`/api/questions/88` 返回 Markdown 答案文本；后端完整测试 `uv run pytest`，59 passed；前端 `npm run check:markdown-math` 与 `npm run build` 通过。
+
+## 2026-04-24 20:22:00 +08:00 - 前端预览兜底撤回验证
+
+- 执行者：Codex
+- 撤回：删除前端 `markdownMath.ts`、`check-markdown-math.mjs` 和 `check:markdown-math` 脚本，`MarkdownContent.vue` 恢复为组件内基础 KaTeX 分隔符规范化。
+- 保留：后端 `normalize_answer_text_for_markdown()` 入库规范化仍保留，确保 `/review/88` 这类 JSON answer map 不再进入数据库原始答案文本。
+- 验证：前端构建 `npm run build` 通过；后端完整测试 `uv run pytest`，59 passed。

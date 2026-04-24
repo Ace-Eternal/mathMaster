@@ -15,7 +15,6 @@ const filters = ref({
   paper_id: undefined as number | undefined,
   review_status: 'PENDING',
   has_answer: undefined as boolean | undefined,
-  include_deleted: false,
 })
 const form = ref({
   question_no: '',
@@ -134,10 +133,9 @@ onMounted(async () => {
             <el-option label="缺失答案" :value="false" />
           </el-select>
         </el-form-item>
-        <el-form-item label="包含已删除">
-          <el-switch v-model="filters.include_deleted" />
+        <el-form-item class="review-filter-actions">
+          <el-button type="primary" plain @click="loadQueue">筛选</el-button>
         </el-form-item>
-        <el-button @click="loadQueue">筛选</el-button>
       </el-form>
       <div class="action-row review-nav-actions">
         <el-button @click="moveSelection('prev')" :disabled="!selectedQuestionId">上一题</el-button>
@@ -287,7 +285,7 @@ onMounted(async () => {
 <style scoped>
 .review-toolbar {
   display: flex;
-  align-items: flex-start;
+  align-items: flex-end;
   justify-content: space-between;
   gap: 18px;
   flex-wrap: wrap;
@@ -295,10 +293,29 @@ onMounted(async () => {
 
 .review-filter-form {
   flex: 1 1 720px;
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.review-filter-form :deep(.el-form-item) {
+  margin-right: 0;
+  margin-bottom: 0;
+}
+
+.review-filter-form :deep(.el-form-item__content) {
+  align-items: center;
+}
+
+.review-filter-actions {
+  padding-top: 22px;
 }
 
 .review-nav-actions {
   justify-content: flex-end;
+  align-items: flex-end;
+  min-height: 54px;
 }
 
 .review-content-grid {
@@ -473,8 +490,17 @@ onMounted(async () => {
     align-items: stretch;
   }
 
+  .review-filter-form {
+    align-items: stretch;
+  }
+
+  .review-filter-actions {
+    padding-top: 0;
+  }
+
   .review-nav-actions {
     justify-content: flex-start;
+    min-height: 0;
   }
 
   .review-meta-grid,

@@ -3,6 +3,7 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
@@ -27,9 +28,19 @@ from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
+from app.utils.answers import normalize_answer_text_for_markdown
 
 
 PROMPT_DIR = Path(__file__).resolve().parents[1] / "app" / "services" / "prompts"
+
+
+def test_normalize_answer_text_for_markdown_expands_json_answer_map():
+    raw = '{"1": "\\\\vec{a}\\\\cdot\\\\vec{b}=1,\\\\ |\\\\vec{a}-\\\\vec{b}|=\\\\sqrt{3}", "2": "k=\\\\frac{2}{5}"}'
+    normalized = normalize_answer_text_for_markdown(raw)
+    assert normalized == (
+        "1. $\\vec{a}\\cdot\\vec{b}=1,\\ |\\vec{a}-\\vec{b}|=\\sqrt{3}$\n\n"
+        "2. $k=\\frac{2}{5}$"
+    )
 
 
 def test_llm_prompts_pin_project_output_contracts():
@@ -589,31 +600,39 @@ def test_build_answer_slices_preserves_page_and_image_blocks():
     assert drafts[0].has_sub_questions is True
 
 
-def test_full_answer_boundary_normalization_expands_section_answers_into_per_question_items():
+def test_full_answer_boundary_normalization_rejects_answers_map_without_block_boundaries():
     gateway = LLMGateway()
-    normalized = gateway._normalize_boundary_result(
-        scenario="full_answer_boundary",
-        result={
-            "answers": {
-                "single_choice": {"1": "A", "2": "D"},
-                "fill_in_blank": {"12": "(1,0)"},
-                "worked_solutions": {
-                    "15": {
-                        "score": "15分",
-                        "parts": [
-                            "（1）证明结论成立",
-                            "（2）因此 $\\sin \\angle MCH = \\frac{\\sqrt{6}}{4}$",
-                        ],
+    with pytest.raises(ValueError, match="full_answer_boundary"):
+        gateway._normalize_boundary_result(
+            scenario="full_answer_boundary",
+            result={
+                "answers": {
+                    "single_choice": {"1": "A", "2": "D"},
+                    "worked_solutions": {"15": "（1）证明结论成立"},
+                }
+            },
+        )
+
+
+def test_full_answer_boundary_normalization_requires_start_and_end_block_indices():
+    gateway = LLMGateway()
+    with pytest.raises(ValueError, match="end_block_index"):
+        gateway._normalize_boundary_result(
+            scenario="full_answer_boundary",
+            result={
+                "items": [
+                    {
+                        "answer_question_no": "17",
+                        "start_block_index": 1800,
+                        "page_start": 1,
+                        "page_end": 1,
+                        "has_sub_questions": True,
+                        "need_manual_review": False,
+                        "review_reason": None,
                     }
-                },
-            }
-        },
-    )
-    assert [item["answer_question_no"] for item in normalized["items"]] == ["1", "2", "12", "15"]
-    worked = next(item for item in normalized["items"] if item["answer_question_no"] == "15")
-    assert "15分" in worked["llm_text"]
-    assert "（2）因此" in worked["llm_text"]
-    assert all(item["text_only_candidate"] is True for item in normalized["items"])
+                ]
+            },
+        )
 
 
 def test_global_answer_match_normalization_does_not_default_to_first_candidate():
@@ -670,7 +689,7 @@ def test_match_service_prefers_same_question_number_when_llm_returns_invalid_can
     assert result["matched_answer_candidate_id"] == "answer-18"
     assert result["matched_answer"].answer_question_no == "18"
     assert result["need_manual_review"] is False
-    assert result["match_confidence"] >= 0.93
+    assert result["match_confidence"] == 0.72
     assert result["review_reason"] is None
 
 
@@ -710,7 +729,33 @@ def test_match_service_keeps_manual_review_when_same_number_fallback_lacks_page_
     assert "同题号答案" in (result["review_reason"] or "")
 
 
-def test_build_answer_slices_prefers_llm_text_for_text_only_candidates():
+def test_build_answer_slices_prefers_document_blocks_over_text_only_summary_when_resolvable():
+    service = SliceService()
+    document_json = [
+        {"type": "text", "text": "17.解：（1）因为 CO\\bot AB，所以 CO\\perp 平面PAB。", "page_idx": 1},
+        {"type": "text", "text": "因为 CO\\subset 平面MOC，所以平面MOC\\bot 平面PAB。", "page_idx": 1},
+        {"type": "text", "text": "（2）过 M 作 MH\\bot AB，连接 HC。", "page_idx": 1},
+        {"type": "text", "text": "所以 \\sin \\angle MCH = \\frac{\\sqrt{6}}{4}。", "page_idx": 1},
+        {"type": "text", "text": "18.解：下一题答案", "page_idx": 2},
+    ]
+    boundaries = service._normalize_answer_boundaries(
+        items=[
+            {
+                "answer_question_no": "17",
+                "llm_text": "（1）平面MOC⊥平面PAB。（2）sin∠MCH=√6/4。",
+                "text_only_candidate": True,
+            }
+        ],
+        blocks=service.normalize_document(document_json),
+    )
+    drafts = service.build_answer_slices(document_json=document_json, boundaries=boundaries)
+    assert len(drafts) == 1
+    assert "因为 CO\\bot AB" in drafts[0].stem_text
+    assert "过 M 作 MH" in drafts[0].stem_text
+    assert "下一题答案" not in drafts[0].stem_text
+
+
+def test_build_answer_slices_uses_llm_text_for_unresolvable_text_only_candidates():
     service = SliceService()
     document_json = [
         {"type": "text", "text": "12.(1,0) 13.0.26 14. $\\frac{5}{4}$", "page_idx": 0},
@@ -1091,7 +1136,7 @@ def test_review_service_maintains_clean_review_state_for_noise_only_records(tmp_
         payload = ReviewService(db, storage).build_question_detail_response(question.id)
         assert payload.review_status == "APPROVED"
         assert payload.review_note is None
-        assert payload.answer.match_confidence >= 0.93
+        assert payload.answer.match_confidence == 0.2
 
 
 def test_review_service_maintains_clean_review_state_without_analysis_record(tmp_path):
@@ -1126,7 +1171,7 @@ def test_review_service_maintains_clean_review_state_without_analysis_record(tmp
         payload = ReviewService(db, storage).build_question_detail_response(question.id)
         assert payload.review_status == "APPROVED"
         assert payload.review_note is None
-        assert payload.answer.match_confidence >= 0.93
+        assert payload.answer.match_confidence == 0.65
 
 
 def test_review_service_marks_paper_sliced_when_no_pending_questions(tmp_path):
@@ -1197,7 +1242,7 @@ def test_review_service_create_update_delete_question_syncs_slice_files_and_rela
                 question_no="13",
                 question_type="解答题",
                 stem_text="13. 修改后的题干",
-                answer_text="修改后的答案",
+                answer_text='{"1": "\\\\vec{a}\\\\cdot\\\\vec{b}=1,\\\\ |\\\\vec{a}-\\\\vec{b}|=\\\\sqrt{3}", "2": "k=\\\\frac{2}{5}"}',
                 page_start=3,
                 page_end=4,
                 review_note="人工调整",
@@ -1205,7 +1250,11 @@ def test_review_service_create_update_delete_question_syncs_slice_files_and_rela
         )
         assert updated.question_no == "13"
         assert updated.question_type == "解答题"
-        assert updated.answer.answer_text == "修改后的答案"
+        assert updated.answer.answer_text == (
+            "1. $\\vec{a}\\cdot\\vec{b}=1,\\ |\\vec{a}-\\vec{b}|=\\sqrt{3}$\n\n"
+            "2. $k=\\frac{2}{5}$"
+        )
+        assert storage.read_file(updated.answer.answer_md_path).decode("utf-8") == updated.answer.answer_text
         assert updated.question_md_path != original_question_path
         assert storage.exists(updated.question_md_path)
         assert not storage.exists(original_question_path)
