@@ -79,12 +79,25 @@ class PaperResponse(TimestampedResponse):
     pending_review_count: int = 0
 
 
+class PipelineTaskResponse(TimestampedResponse):
+    id: int
+    paper_id: int
+    status: str
+    source: str
+    queued_at: datetime
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    error_message: str | None = None
+    queue_position: int | None = None
+
+
 class PipelineRunResponse(BaseModel):
     paper_id: int
     paper_status: str
     jobs: list[ConversionJobResponse]
     question_count: int
     questions: list[QuestionSummary]
+    pipeline_task: PipelineTaskResponse | None = None
 
 
 class MineuPreviewResponse(BaseModel):

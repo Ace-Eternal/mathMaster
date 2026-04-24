@@ -30,6 +30,8 @@ MathMaster 是前后端分离项目：
 - 文件检索优先使用 `rg` / `rg --files`。
 - 写文件优先使用 `apply_patch`。
 - 复杂任务使用计划工具维护步骤和状态。
+- Python 版本与虚拟环境统一使用 `uv` 管理；后端命令默认在 `backend/` 下通过 `uv run ...` 执行，并以 `backend/.python-version` 为项目 Python 版本声明。
+- Node.js 版本统一使用 `nvm` 管理；前端命令默认在 `frontend/` 下先切换到项目约定的 Node.js 版本，再执行 `npm install`、`npm run dev` 等命令。
 - 若全局手册要求的 MCP 工具当前不可用，例如 `sequential-thinking`、`shrimp-task-manager`、`code-index`、`exa`，需要在 `.codex/operations-log.md` 中记录不可用原因，并用当前可用工具完成等价分析。
 - 网络信息、最新版本、外部文档等不稳定事实必须联网核验，并优先使用官方来源。
 

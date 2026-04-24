@@ -38,3 +38,11 @@
 - 后端测试：`uv run pytest`，46 passed。
 - 前端构建：`npm run build`，通过。
 - 接口验证：`数学卷-2506丽水高一期末` 与 `数学卷-2506宁波三峰高一期末` 均返回 `SLICED / pending_review_count=0`。
+
+## 2026-04-24 16:05:00 +08:00 - 本地单 Worker 持久化队列验证
+
+- 执行者：Codex
+- 后端测试：`cd backend; uv run pytest`，54 passed。
+- 前端构建：`cd frontend; npm run build`，通过。
+- 已覆盖：入队、重复入队去重、按顺序 claim、成功/失败标记、启动恢复、单试卷 API、批量 API、队列位置 API。
+- 构建提示：Vite chunk size warning 与 npmrc 配置提示仍为既有提示，不影响本次验证。

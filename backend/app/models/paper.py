@@ -21,6 +21,25 @@ class ImportJob(TimestampMixin, Base):
     summary_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
+class PipelineTask(TimestampMixin, Base):
+    __tablename__ = "pipeline_task"
+    __table_args__ = (
+        Index("ix_pipeline_task_status_queued_at", "status", "queued_at"),
+        Index("ix_pipeline_task_paper_status", "paper_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    paper_id: Mapped[int] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
+    source: Mapped[str] = mapped_column(String(32), default="SINGLE", nullable=False)
+    queued_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime)
+    error_message: Mapped[str | None] = mapped_column(Text)
+
+    paper: Mapped["Paper"] = relationship()
+
+
 class Paper(TimestampMixin, Base):
     __tablename__ = "paper"
     __table_args__ = (

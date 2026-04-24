@@ -1,5 +1,6 @@
 export type TaskStage =
   | '上传中'
+  | '排队中'
   | '待运行'
   | 'MineU解析中'
   | 'MineU解析失败'
@@ -26,6 +27,8 @@ export type TaskListItem = {
   note: string | null
   sourceLabel: string
   isTransient?: boolean
+  queuePosition?: number | null
+  queueStatus?: string | null
 }
 
 export type PaperLike = {
@@ -48,16 +51,17 @@ export type PaperLike = {
 
 export const STAGE_ORDER: Record<TaskStage, number> = {
   上传中: 0,
-  MineU解析中: 1,
-  边界识别中: 2,
-  切题匹配中: 3,
-  MineU解析失败: 4,
-  边界识别失败: 5,
-  切题匹配失败: 6,
-  系统异常: 7,
-  待人工审核: 8,
-  待运行: 9,
-  已完成: 10
+  排队中: 1,
+  MineU解析中: 2,
+  边界识别中: 3,
+  切题匹配中: 4,
+  MineU解析失败: 5,
+  边界识别失败: 6,
+  切题匹配失败: 7,
+  系统异常: 8,
+  待人工审核: 9,
+  待运行: 10,
+  已完成: 11
 }
 
 export const stageTagType = (stage: TaskStage) => {
@@ -68,6 +72,7 @@ export const stageTagType = (stage: TaskStage) => {
       return 'warning'
     case '边界识别中':
     case '待运行':
+    case '排队中':
       return 'info'
     case 'MineU解析中':
     case '切题匹配中':
@@ -198,7 +203,7 @@ export const summarizeTasks = (items: TaskListItem[]) => {
   return {
     total: items.length,
     queued: items.filter((item) => item.stage === '待运行').length,
-    processing: items.filter((item) => ['上传中', 'MineU解析中', '边界识别中', '切题匹配中'].includes(item.stage)).length,
+    processing: items.filter((item) => ['上传中', '排队中', 'MineU解析中', '边界识别中', '切题匹配中'].includes(item.stage)).length,
     completed: items.filter((item) => item.stage === '已完成').length,
     failed: items.filter((item) => ['MineU解析失败', '边界识别失败', '切题匹配失败', '系统异常'].includes(item.stage)).length,
     review: items.filter((item) => item.stage === '待人工审核').length

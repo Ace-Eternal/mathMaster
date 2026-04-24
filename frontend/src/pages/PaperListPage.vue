@@ -15,12 +15,27 @@ type ImportItem = {
   has_answer: boolean
 }
 
+type PipelineTaskItem = {
+  id: number
+  paper_id: number
+  status: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | string
+  source: 'SINGLE' | 'BATCH' | string
+  queued_at: string
+  started_at: string | null
+  finished_at: string | null
+  error_message: string | null
+  queue_position: number | null
+  created_at: string
+  updated_at: string
+}
+
 const loading = ref(false)
 const singleUploadLoading = ref(false)
 const importLoading = ref(false)
 const batchRunning = ref(false)
 const refreshing = ref(false)
 const papers = ref<any[]>([])
+const pipelineTasks = ref<PipelineTaskItem[]>([])
 const latestImportItems = ref<ImportItem[]>([])
 const latestImportSummary = ref<any | null>(null)
 const transientTasks = ref<TaskListItem[]>([])
@@ -61,8 +76,12 @@ const loadPapers = async (options: { silent?: boolean } = {}) => {
   refreshing.value = true
   if (!options.silent) loading.value = true
   try {
-    const { data } = await api.get('/papers')
-    papers.value = data
+    const [paperResponse, taskResponse] = await Promise.all([
+      api.get('/papers'),
+      api.get('/papers/pipeline-tasks')
+    ])
+    papers.value = paperResponse.data
+    pipelineTasks.value = taskResponse.data
   } finally {
     refreshing.value = false
     if (!options.silent) loading.value = false
@@ -79,10 +98,30 @@ const unmarkPaperRunning = (paperId: number) => {
   runningPaperIds.value = next
 }
 
-const isPaperRunning = (paperId: number | null) => Boolean(paperId && runningPaperIds.value.has(paperId))
+const taskByPaperId = computed(() => {
+  const statusPriority: Record<string, number> = { RUNNING: 0, QUEUED: 1, FAILED: 2 }
+  const items = [...pipelineTasks.value].sort((a, b) => {
+    const statusDelta = (statusPriority[a.status] ?? 9) - (statusPriority[b.status] ?? 9)
+    if (statusDelta !== 0) return statusDelta
+    return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
+  })
+  return new Map(items.map((task) => [task.paper_id, task]))
+})
+
+const isActivePipelineTask = (task?: PipelineTaskItem) => task?.status === 'QUEUED' || task?.status === 'RUNNING'
+
+const activePipelinePaperIds = computed(() => {
+  const activeIds = pipelineTasks.value
+    .filter((task) => isActivePipelineTask(task))
+    .map((task) => task.paper_id)
+  return new Set([...runningPaperIds.value, ...activeIds])
+})
+
+const isPaperRunning = (paperId: number | null) =>
+  Boolean(paperId && activePipelinePaperIds.value.has(paperId))
 
 const hasLiveTasks = computed(() =>
-  taskItems.value.some((item) => ['上传中', 'MineU解析中', '边界识别中', '切题匹配中'].includes(item.stage))
+  taskItems.value.some((item) => ['上传中', '排队中', 'MineU解析中', '边界识别中', '切题匹配中'].includes(item.stage))
 )
 
 const stopAutoRefresh = () => {
@@ -225,32 +264,41 @@ const submitFolderImport = async () => {
 }
 
 const runPipeline = async (paperId: number) => {
-  if (isPaperRunning(paperId)) return
+  if (isPaperRunning(paperId)) {
+    ElMessage.info('该试卷已在队列中。')
+    return
+  }
   const paper = papers.value.find((item) => item.id === paperId)
   markPaperRunning(paperId)
   persistTransientTask({
     id: `run-${paperId}`,
     paperId,
     title: paper?.title || `试卷 #${paperId}`,
-    stage: 'MineU解析中',
-    progress: 20,
+    stage: '排队中',
+    progress: 12,
     hasAnswer: Boolean(paper?.answer_sheet?.has_answer),
     mineuSuccess: false,
     questionCount: paper?.questions?.length || 0,
     pendingReviewCount: paper?.pending_review_count || 0,
     updatedAt: new Date().toISOString(),
     errorSummary: null,
-    note: '已手动触发流程，准备执行 MineU 解析。',
+    note: '已提交本地单 worker 队列，等待串行执行。',
     sourceLabel: '试卷任务',
     isTransient: true
   })
 
   try {
     startAutoRefresh()
-    await api.post(`/papers/${paperId}/pipeline/run-all`)
+    const { data } = await api.post(`/papers/${paperId}/pipeline/run-all`)
+    if (data.pipeline_task) {
+      pipelineTasks.value = [
+        data.pipeline_task,
+        ...pipelineTasks.value.filter((task) => task.id !== data.pipeline_task.id)
+      ]
+    }
     removeTransientTask(`run-${paperId}`)
-    ElMessage.success('整理切片完成。')
-    await loadPapers()
+    ElMessage.success(data.pipeline_task?.status === 'RUNNING' ? '该试卷正在运行。' : '已加入本地运行队列。')
+    await loadPapers({ silent: true })
   } catch (error: any) {
     const message = errorMessage(error, '流水线执行失败。')
     persistTransientTask({
@@ -271,7 +319,9 @@ const runPipeline = async (paperId: number) => {
     })
     ElMessage.error(message)
   } finally {
-    unmarkPaperRunning(paperId)
+    if (!isActivePipelineTask(taskByPaperId.value.get(paperId))) {
+      unmarkPaperRunning(paperId)
+    }
     await loadPapers({ silent: true })
   }
 }
@@ -291,15 +341,15 @@ const runImportedBatch = async () => {
       id: `run-${paperId}`,
       paperId,
       title: item?.paper_filename || `试卷 #${paperId}`,
-      stage: 'MineU解析中',
-      progress: 20,
+      stage: '排队中',
+      progress: 12,
       hasAnswer: Boolean(item?.has_answer),
       mineuSuccess: false,
       questionCount: 0,
       pendingReviewCount: 0,
       updatedAt: new Date().toISOString(),
       errorSummary: null,
-      note: '已手动触发批量流程，准备执行 MineU 解析。',
+      note: '已提交本地单 worker 队列，等待按顺序执行。',
       sourceLabel: '批量任务',
       isTransient: true
     })
@@ -307,10 +357,18 @@ const runImportedBatch = async () => {
 
   try {
     startAutoRefresh()
-    await api.post('/papers/batch/run', { paper_ids: paperIds })
+    const { data } = await api.post('/papers/batch/run', { paper_ids: paperIds })
+    const returnedTasks = data.map((item: any) => item.pipeline_task).filter(Boolean)
+    if (returnedTasks.length) {
+      const returnedIds = new Set(returnedTasks.map((task: PipelineTaskItem) => task.id))
+      pipelineTasks.value = [
+        ...returnedTasks,
+        ...pipelineTasks.value.filter((task) => !returnedIds.has(task.id))
+      ]
+    }
     paperIds.forEach((paperId) => removeTransientTask(`run-${paperId}`))
-    ElMessage.success('本次导入任务已完成批量整理。')
-    await loadPapers()
+    ElMessage.success('本次导入任务已加入本地运行队列。')
+    await loadPapers({ silent: true })
   } catch (error: any) {
     const message = errorMessage(error, '批量任务执行失败。')
     paperIds.forEach((paperId) => {
@@ -335,16 +393,65 @@ const runImportedBatch = async () => {
     ElMessage.error(message)
   } finally {
     batchRunning.value = false
-    paperIds.forEach((paperId) => unmarkPaperRunning(paperId))
+    paperIds.forEach((paperId) => {
+      if (!isActivePipelineTask(taskByPaperId.value.get(paperId))) {
+        unmarkPaperRunning(paperId)
+      }
+    })
     await loadPapers({ silent: true })
   }
 }
 
+const applyPipelineTaskState = (paperTask: TaskListItem, task?: PipelineTaskItem): TaskListItem => {
+  if (!task) return paperTask
+  if (task.status === 'QUEUED') {
+    return {
+      ...paperTask,
+      stage: '排队中',
+      progress: Math.max(paperTask.progress, 12),
+      updatedAt: task.updated_at || paperTask.updatedAt,
+      errorSummary: null,
+      note: task.queue_position
+        ? `本地单 worker 队列第 ${task.queue_position} 位，等待运行。`
+        : '已进入本地单 worker 队列，等待运行。',
+      queuePosition: task.queue_position,
+      queueStatus: task.status
+    }
+  }
+  if (task.status === 'RUNNING') {
+    const runningStages = ['MineU解析中', '边界识别中', '切题匹配中']
+    return {
+      ...paperTask,
+      stage: runningStages.includes(paperTask.stage) ? paperTask.stage : 'MineU解析中',
+      progress: Math.max(paperTask.progress, 20),
+      updatedAt: task.updated_at || paperTask.updatedAt,
+      errorSummary: null,
+      note: paperTask.note || '本地队列正在执行该试卷。',
+      queuePosition: null,
+      queueStatus: task.status
+    }
+  }
+  if (task.status === 'FAILED') {
+    return {
+      ...paperTask,
+      stage: '系统异常',
+      progress: 100,
+      updatedAt: task.updated_at || paperTask.updatedAt,
+      errorSummary: task.error_message || paperTask.errorSummary || '本地队列任务执行失败。',
+      note: null,
+      queuePosition: null,
+      queueStatus: task.status
+    }
+  }
+  return paperTask
+}
+
 const taskItems = computed(() => {
-  const paperTasks = papers.value.map((paper) => deriveTaskFromPaper(paper))
+  const paperTasks = papers.value.map((paper) => applyPipelineTaskState(deriveTaskFromPaper(paper), taskByPaperId.value.get(paper.id)))
   const transientByPaperId = new Map(
     transientTasks.value
       .filter((task) => task.paperId)
+      .filter((task) => !taskByPaperId.value.has(task.paperId as number))
       .map((task) => [task.paperId, task])
   )
   const mergedPaperTasks = paperTasks.map((paperTask) => transientByPaperId.get(paperTask.paperId) || paperTask)
@@ -609,7 +716,7 @@ onBeforeUnmount(stopAutoRefresh)
                 :disabled="isPaperRunning(item.paperId)"
                 @click="runPipeline(item.paperId)"
               >
-                立即运行
+                {{ isPaperRunning(item.paperId) ? '已入队' : '立即运行' }}
               </el-button>
             </div>
           </div>
@@ -619,7 +726,7 @@ onBeforeUnmount(stopAutoRefresh)
     </section>
 
     <TaskOverviewCards :summary="summary" />
-    <TaskStatusList :items="taskItems" :loading="loading" :running-paper-ids="runningPaperIds" @rerun="runPipeline" />
+    <TaskStatusList :items="taskItems" :loading="loading" :running-paper-ids="activePipelinePaperIds" @rerun="runPipeline" />
   </div>
 </template>
 

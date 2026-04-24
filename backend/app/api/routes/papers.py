@@ -1,13 +1,10 @@
 from __future__ import annotations
 
 import json
-import logging
-import threading
 
 from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
 from sqlalchemy.orm import Session
 
-from app.db.session import SessionLocal
 from app.db.session import get_db
 from app.schemas.paper import (
     BatchRunRequest,
@@ -17,16 +14,17 @@ from app.schemas.paper import (
     PaperResponse,
     PaperUpdateRequest,
     PipelineRunResponse,
+    PipelineTaskResponse,
 )
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import MatchService, PaperPipelineService, SliceService
+from app.services.pipeline_queue import pipeline_task_queue
 from app.services.review import ReviewService
 from app.services.storage.factory import get_storage_service
 
 router = APIRouter()
-logger = logging.getLogger(__name__)
 
 
 def get_pipeline_service(db: Session) -> PaperPipelineService:
@@ -39,27 +37,43 @@ def get_pipeline_service(db: Session) -> PaperPipelineService:
     )
 
 
-def build_pipeline_response(paper) -> PipelineRunResponse:
+def build_task_response(task, *, queue_position: int | None = None) -> PipelineTaskResponse:
+    return PipelineTaskResponse(
+        id=task.id,
+        paper_id=task.paper_id,
+        status=task.status,
+        source=task.source,
+        queued_at=task.queued_at,
+        started_at=task.started_at,
+        finished_at=task.finished_at,
+        error_message=task.error_message,
+        queue_position=queue_position,
+        created_at=task.created_at,
+        updated_at=task.updated_at,
+    )
+
+
+def build_task_responses(tasks) -> list[PipelineTaskResponse]:
+    queue_position = 0
+    responses: list[PipelineTaskResponse] = []
+    for task in tasks:
+        position = None
+        if task.status == "QUEUED":
+            queue_position += 1
+            position = queue_position
+        responses.append(build_task_response(task, queue_position=position))
+    return responses
+
+
+def build_pipeline_response(paper, task=None) -> PipelineRunResponse:
     return PipelineRunResponse(
         paper_id=paper.id,
         paper_status=paper.status,
         jobs=paper.conversion_jobs,
         question_count=len(paper.questions),
         questions=paper.questions,
+        pipeline_task=build_task_response(task) if task else None,
     )
-
-
-def run_pipeline_background(paper_id: int) -> None:
-    with SessionLocal() as db:
-        try:
-            get_pipeline_service(db).run_pipeline(paper_id)
-        except Exception:  # noqa: BLE001
-            logger.exception("Background pipeline failed for paper %s", paper_id)
-
-
-def start_pipeline_worker(paper_id: int) -> None:
-    worker = threading.Thread(target=run_pipeline_background, args=(paper_id,), daemon=True)
-    worker.start()
 
 
 @router.get("", response_model=list[PaperResponse])
@@ -152,10 +166,15 @@ def get_import_job(import_job_id: int, db: Session = Depends(get_db)):
 @router.post("/batch/run", response_model=list[PipelineRunResponse])
 def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
     service = get_pipeline_service(db)
-    papers = [service.get_paper(paper_id) for paper_id in payload.paper_ids]
-    for paper in papers:
-        start_pipeline_worker(paper.id)
-    return [build_pipeline_response(paper) for paper in papers]
+    responses = []
+    for paper_id in payload.paper_ids:
+        paper = service.get_paper(paper_id)
+        task = pipeline_task_queue.enqueue(db, paper_id=paper.id, source="BATCH")
+        db.commit()
+        db.refresh(task)
+        pipeline_task_queue.notify()
+        responses.append(build_pipeline_response(paper, task))
+    return responses
 
 
 @router.patch("/{paper_id}", response_model=PaperResponse)
@@ -212,8 +231,16 @@ def unbind_answer(paper_id: int, db: Session = Depends(get_db)):
 @router.post("/{paper_id}/pipeline/run-all", response_model=PipelineRunResponse)
 def run_pipeline(paper_id: int, db: Session = Depends(get_db)):
     paper = get_pipeline_service(db).get_paper(paper_id)
-    start_pipeline_worker(paper.id)
-    return build_pipeline_response(paper)
+    task = pipeline_task_queue.enqueue(db, paper_id=paper.id, source="SINGLE")
+    db.commit()
+    db.refresh(task)
+    pipeline_task_queue.notify()
+    return build_pipeline_response(paper, task)
+
+
+@router.get("/pipeline-tasks", response_model=list[PipelineTaskResponse])
+def list_pipeline_tasks(db: Session = Depends(get_db)):
+    return build_task_responses(pipeline_task_queue.list_visible_tasks(db))
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)

@@ -3,20 +3,26 @@ import json
 import zipfile
 from pathlib import Path
 
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.routes import papers as paper_routes
 from app.api.routes import templates as template_routes
 from app.core.config import settings
 from app.db.base import Base
 from app.db import init_db as init_db_module
-from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
+from app.db.session import get_db
+from app.models import ChatMessage, ChatSession, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest, ReviewUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key
+from app.services import pipeline_queue as pipeline_queue_module
+from app.services.pipeline_queue import PipelineTaskQueue
 from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
@@ -43,6 +49,209 @@ def test_llm_prompts_pin_project_output_contracts():
     assert "不要输出 `answers`、`sections`、`solutions`" in answer_boundary_prompt
     assert "每个答案对象必须且只能包含示例中的 8 个字段" in answer_boundary_prompt
     assert '"answer_question_no"' in answer_boundary_prompt
+
+
+def make_pipeline_queue_session(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'queue.db'}", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    return sessionmaker(bind=engine, autoflush=False, autocommit=False, class_=Session)
+
+
+def add_queue_test_paper(db: Session, title: str = "测试卷") -> Paper:
+    paper = Paper(title=title, paper_pdf_path=f"raw/{title}.pdf", paper_pdf_hash=f"hash-{title}")
+    db.add(paper)
+    db.flush()
+    return paper
+
+
+def make_papers_api_client(session_factory):
+    app = FastAPI()
+    app.include_router(paper_routes.router, prefix="/api/papers")
+
+    def override_get_db():
+        with session_factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
+def test_pipeline_task_queue_enqueue_creates_queued_task(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    queue = PipelineTaskQueue()
+
+    with session_factory() as db:
+        paper = add_queue_test_paper(db)
+        task = queue.enqueue(db, paper_id=paper.id, source="SINGLE")
+        db.commit()
+
+        assert task.status == "QUEUED"
+        assert task.source == "SINGLE"
+        assert task.paper_id == paper.id
+
+
+def test_run_pipeline_api_enqueues_and_returns_immediately(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    queue = PipelineTaskQueue()
+    monkeypatch.setattr(paper_routes, "pipeline_task_queue", queue)
+
+    with session_factory() as db:
+        paper = add_queue_test_paper(db)
+        db.commit()
+        paper_id = paper.id
+
+    client = make_papers_api_client(session_factory)
+    response = client.post(f"/api/papers/{paper_id}/pipeline/run-all")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["paper_id"] == paper_id
+    assert payload["pipeline_task"]["status"] == "QUEUED"
+    with session_factory() as db:
+        tasks = db.execute(select(PipelineTask)).scalars().all()
+        assert len(tasks) == 1
+        assert tasks[0].paper_id == paper_id
+
+
+def test_pipeline_task_queue_enqueue_returns_existing_active_task(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    queue = PipelineTaskQueue()
+
+    with session_factory() as db:
+        paper = add_queue_test_paper(db)
+        first_task = queue.enqueue(db, paper_id=paper.id, source="SINGLE")
+        second_task = queue.enqueue(db, paper_id=paper.id, source="BATCH")
+        db.commit()
+
+        task_count = db.execute(select(PipelineTask)).scalars().all()
+        assert second_task.id == first_task.id
+        assert len(task_count) == 1
+        assert second_task.source == "SINGLE"
+
+
+def test_batch_run_api_enqueues_in_order_without_duplicate_tasks(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    queue = PipelineTaskQueue()
+    monkeypatch.setattr(paper_routes, "pipeline_task_queue", queue)
+
+    with session_factory() as db:
+        paper_one = add_queue_test_paper(db, "一号卷")
+        paper_two = add_queue_test_paper(db, "二号卷")
+        db.commit()
+        paper_one_id = paper_one.id
+        paper_two_id = paper_two.id
+
+    client = make_papers_api_client(session_factory)
+    response = client.post("/api/papers/batch/run", json={"paper_ids": [paper_one_id, paper_one_id, paper_two_id]})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["paper_id"] for item in payload] == [paper_one_id, paper_one_id, paper_two_id]
+    assert payload[0]["pipeline_task"]["id"] == payload[1]["pipeline_task"]["id"]
+    with session_factory() as db:
+        tasks = list(db.execute(select(PipelineTask).order_by(PipelineTask.id.asc())).scalars())
+        assert [task.paper_id for task in tasks] == [paper_one_id, paper_two_id]
+        assert [task.source for task in tasks] == ["BATCH", "BATCH"]
+
+
+def test_pipeline_tasks_api_returns_queue_positions(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    queue = PipelineTaskQueue()
+    monkeypatch.setattr(paper_routes, "pipeline_task_queue", queue)
+
+    with session_factory() as db:
+        paper_one = add_queue_test_paper(db, "一号卷")
+        paper_two = add_queue_test_paper(db, "二号卷")
+        paper_three = add_queue_test_paper(db, "三号卷")
+        db.add_all(
+            [
+                PipelineTask(paper_id=paper_one.id, status="RUNNING", source="SINGLE"),
+                PipelineTask(paper_id=paper_two.id, status="QUEUED", source="BATCH"),
+                PipelineTask(paper_id=paper_three.id, status="QUEUED", source="BATCH"),
+            ]
+        )
+        db.commit()
+
+    client = make_papers_api_client(session_factory)
+    response = client.get("/api/papers/pipeline-tasks")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert [item["status"] for item in payload] == ["RUNNING", "QUEUED", "QUEUED"]
+    assert [item["queue_position"] for item in payload] == [None, 1, 2]
+
+
+def test_pipeline_task_queue_claims_tasks_in_queued_order_and_marks_success(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    monkeypatch.setattr(pipeline_queue_module, "SessionLocal", session_factory)
+    queue = PipelineTaskQueue()
+
+    with session_factory() as db:
+        paper_one = add_queue_test_paper(db, "一号卷")
+        paper_two = add_queue_test_paper(db, "二号卷")
+        task_one = queue.enqueue(db, paper_id=paper_one.id, source="BATCH")
+        task_two = queue.enqueue(db, paper_id=paper_two.id, source="BATCH")
+        db.commit()
+        paper_one_id = paper_one.id
+        paper_two_id = paper_two.id
+        task_one_id = task_one.id
+        task_two_id = task_two.id
+
+    assert queue._claim_next_task() == (task_one_id, paper_one_id)
+    assert queue._claim_next_task() == (task_two_id, paper_two_id)
+
+    queue._mark_task_success(task_one_id)
+    queue._mark_task_success(task_two_id)
+
+    with session_factory() as db:
+        statuses = [
+            task.status
+            for task in db.execute(select(PipelineTask).order_by(PipelineTask.id.asc())).scalars()
+        ]
+        assert statuses == ["SUCCESS", "SUCCESS"]
+
+
+def test_pipeline_task_queue_marks_failed_with_error_message(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    monkeypatch.setattr(pipeline_queue_module, "SessionLocal", session_factory)
+    queue = PipelineTaskQueue()
+
+    with session_factory() as db:
+        paper = add_queue_test_paper(db)
+        task = queue.enqueue(db, paper_id=paper.id, source="SINGLE")
+        db.commit()
+        paper_id = paper.id
+        task_id = task.id
+
+    assert queue._claim_next_task() == (task_id, paper_id)
+    queue._mark_task_failed(task_id, "LLM streaming response empty")
+
+    with session_factory() as db:
+        failed_task = db.get(PipelineTask, task_id)
+        assert failed_task.status == "FAILED"
+        assert failed_task.error_message == "LLM streaming response empty"
+        assert failed_task.finished_at is not None
+
+
+def test_pipeline_task_queue_requeues_running_tasks_on_startup(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    monkeypatch.setattr(pipeline_queue_module, "SessionLocal", session_factory)
+    queue = PipelineTaskQueue()
+
+    with session_factory() as db:
+        paper = add_queue_test_paper(db)
+        task = PipelineTask(paper_id=paper.id, status="RUNNING", source="SINGLE", error_message="中断")
+        db.add(task)
+        db.commit()
+        task_id = task.id
+
+    assert queue.requeue_running_tasks() == 1
+
+    with session_factory() as db:
+        restored_task = db.get(PipelineTask, task_id)
+        assert restored_task.status == "QUEUED"
+        assert restored_task.started_at is None
+        assert restored_task.error_message is None
 
 
 def test_sqlite_startup_drops_legacy_subject_columns(tmp_path, monkeypatch):

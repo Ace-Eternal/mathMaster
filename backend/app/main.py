@@ -6,12 +6,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.routes import analysis, chat, dictionary, files, papers, questions, review, search, settings as settings_routes, templates
 from app.core.config import settings
 from app.db.init_db import init_db
+from app.services.pipeline_queue import pipeline_task_queue
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     init_db()
+    pipeline_task_queue.start()
     yield
+    pipeline_task_queue.stop()
 
 
 app = FastAPI(

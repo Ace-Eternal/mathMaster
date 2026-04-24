@@ -18,6 +18,14 @@ const formatTime = (value: string | null) => {
   if (!value) return '刚刚'
   return new Date(value).toLocaleString('zh-CN', { hour12: false })
 }
+
+const isQueueActive = (row: TaskListItem) => row.queueStatus === 'QUEUED' || row.queueStatus === 'RUNNING'
+
+const actionText = (row: TaskListItem) => {
+  if (row.queueStatus === 'QUEUED') return '已入队'
+  if (row.queueStatus === 'RUNNING') return '运行中'
+  return '重新运行'
+}
 </script>
 
 <template>
@@ -94,10 +102,10 @@ const formatTime = (value: string | null) => {
               text
               type="primary"
               :loading="runningPaperIds?.has(row.paperId)"
-              :disabled="runningPaperIds?.has(row.paperId)"
+              :disabled="runningPaperIds?.has(row.paperId) || isQueueActive(row)"
               @click="emit('rerun', row.paperId)"
             >
-              重新运行
+              {{ actionText(row) }}
             </el-button>
           </div>
         </template>

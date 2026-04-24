@@ -6,6 +6,7 @@ from app.models.paper import (
     ImportJob,
     KnowledgePoint,
     Paper,
+    PipelineTask,
     Question,
     QuestionAnalysis,
     QuestionAnswer,
@@ -19,6 +20,7 @@ from app.models.paper import (
 __all__ = [
     "Paper",
     "ImportJob",
+    "PipelineTask",
     "AnswerSheet",
     "ConversionJob",
     "Question",
