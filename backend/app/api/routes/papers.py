@@ -203,9 +203,9 @@ def delete_question(paper_id: int, question_id: int, db: Session = Depends(get_d
     return get_pipeline_service(db).get_paper(paper_id)
 
 
-@router.delete("/{paper_id}", response_model=PaperResponse)
-def soft_delete_paper(paper_id: int, db: Session = Depends(get_db)):
-    return get_pipeline_service(db).soft_delete_paper(paper_id)
+@router.delete("/{paper_id}")
+def delete_paper(paper_id: int, db: Session = Depends(get_db)):
+    return get_pipeline_service(db).hard_delete_paper(paper_id)
 
 
 @router.post("/{paper_id}/restore", response_model=PaperResponse)

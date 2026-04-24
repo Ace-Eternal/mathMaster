@@ -46,3 +46,39 @@
 - 前端构建：`cd frontend; npm run build`，通过。
 - 已覆盖：入队、重复入队去重、按顺序 claim、成功/失败标记、启动恢复、单试卷 API、批量 API、队列位置 API。
 - 构建提示：Vite chunk size warning 与 npmrc 配置提示仍为既有提示，不影响本次验证。
+
+## 2026-04-24 16:18:00 +08:00 - 待运行任务删除按钮验证
+
+- 执行者：Codex
+- 前端构建：`cd frontend; npm run build`，通过。
+- 修复：任务状态列表中 `待运行` 且非临时任务新增“删除任务”按钮，确认后调用 `DELETE /api/papers/{paper_id}` 删除并刷新列表。
+
+## 2026-04-24 16:40:00 +08:00 - 试卷硬删除与存储清理验证
+
+- 执行者：Codex
+- 后端测试：`cd backend; uv run pytest`，55 passed。
+- 前端构建：`cd frontend; npm run build`，通过。
+- 修复：`DELETE /api/papers/{paper_id}` 改为硬删除，清理试卷 PDF、答案 PDF、`mineu/{paper_id}`、`slices/{paper_id}` 以及题目、答案、审核、聊天、队列等关联记录。
+- 约束：试卷流水线处于 `RUNNING` 时拒绝删除，避免 worker 正在读写同一试卷。
+
+## 2026-04-24 16:50:00 +08:00 - 删除确认与管理页筛选清理验证
+
+- 执行者：Codex
+- 前端构建：`cd frontend; npm run build`，通过。
+- 修复：确认 `/papers` 待运行任务删除与 `/paper-management` 试卷删除均有二次确认。
+- 修复：移除 `/paper-management` 筛选区中的“已删除”开关，并清理硬删除后不再可用的恢复按钮逻辑。
+
+## 2026-04-24 17:02:00 +08:00 - 试卷管理列表横向压缩验证
+
+- 执行者：Codex
+- 前端构建：`cd frontend; npm run build`，通过。
+- 修复：`/paper-management` 表格从多列横向展开改为 4 列纵向信息堆叠，合并年份、地区、年级、学期、答案和待审信息，减少用户横向滚动需求。
+
+## 2026-04-24 17:18:00 +08:00 - 本地试卷存储清理验证
+
+- 执行者：Codex
+- 数据库清理：硬删除除 `paper_id=28`、`paper_id=29` 之外的历史试卷记录 27 条。
+- 文件清理：通过项目硬删除服务删除历史试卷关联文件 320 个；额外删除孤儿 PDF 2 个，合计额外释放 2,629,744 bytes。
+- 数据库压缩：执行 `PRAGMA wal_checkpoint(TRUNCATE)` 与 `VACUUM`，`mathmaster.db` 从 503,808 bytes 降到 299,008 bytes，WAL 清空为 0 bytes。
+- 复核：`/api/papers/manage` 返回 2 条：`数学卷-2506丽水高一期末` 与 `数学卷-2506宁波三峰高一期末`。
+- 复核：`data/raw` 仅剩 2 份试卷 PDF 和 2 份答案 PDF；`data/mineu` 仅剩 `28`、`29`；`data/slices` 仅剩 `28`、`29`。

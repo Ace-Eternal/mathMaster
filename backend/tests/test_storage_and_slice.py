@@ -14,7 +14,7 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db import init_db as init_db_module
 from app.db.session import get_db
-from app.models import ChatMessage, ChatSession, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
+from app.models import AnswerSheet, ChatMessage, ChatSession, ConversionJob, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest, ReviewUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
@@ -179,6 +179,90 @@ def test_pipeline_tasks_api_returns_queue_positions(tmp_path, monkeypatch):
     payload = response.json()
     assert [item["status"] for item in payload] == ["RUNNING", "QUEUED", "QUEUED"]
     assert [item["queue_position"] for item in payload] == [None, 1, 2]
+
+
+def test_hard_delete_paper_removes_records_and_storage_assets(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    storage = LocalFileStorageService(str(tmp_path / "storage"))
+
+    with Session(engine) as db:
+        paper = Paper(title="删除测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        paper_id = paper.id
+        storage.save_file(b"paper", paper.paper_pdf_path)
+
+        answer_sheet = AnswerSheet(
+            paper_id=paper_id,
+            answer_pdf_path="raw/answer.pdf",
+            answer_pdf_hash="answer-hash",
+            has_answer=True,
+            status="READY",
+        )
+        storage.save_file(b"answer", answer_sheet.answer_pdf_path)
+        db.add(answer_sheet)
+
+        mineu_prefix = f"mineu/{paper_id}"
+        storage.save_file(b"md", f"{mineu_prefix}/paper.md")
+        storage.save_file(b"{}", f"{mineu_prefix}/paper.json")
+        storage.save_file(b"raw", f"{mineu_prefix}/paper.raw.json")
+        storage.save_file(b"img", f"{mineu_prefix}/images/demo.png")
+        db.add(
+            ConversionJob(
+                paper_id=paper_id,
+                job_type="PAPER",
+                provider="MINEU",
+                status="SUCCESS",
+                markdown_path=f"{mineu_prefix}/paper.md",
+                json_path=f"{mineu_prefix}/paper.json",
+                raw_response_path=f"{mineu_prefix}/paper.raw.json",
+            )
+        )
+
+        slice_prefix = f"slices/{paper_id}/q_001"
+        storage.save_file(b"question", f"{slice_prefix}/question.md")
+        storage.save_file(b"{}", f"{slice_prefix}/question.json")
+        storage.save_file(b"answer", f"{slice_prefix}/answer.md")
+        storage.save_file(b"{}", f"{slice_prefix}/answer.json")
+        question = Question(
+            paper_id=paper_id,
+            question_no="1",
+            stem_text="题干",
+            question_md_path=f"{slice_prefix}/question.md",
+            question_json_path=f"{slice_prefix}/question.json",
+            review_status="PENDING",
+        )
+        db.add(question)
+        db.flush()
+        db.add(QuestionAnswer(question_id=question.id, answer_text="答案", answer_md_path=f"{slice_prefix}/answer.md", answer_json_path=f"{slice_prefix}/answer.json"))
+        db.add(QuestionAnalysis(question_id=question.id, analysis_json="{}"))
+        session = ChatSession(question_id=question.id, title="会话")
+        db.add(session)
+        db.flush()
+        db.add(ChatMessage(session_id=session.id, role="user", content="问题"))
+        db.add(ReviewRecord(paper_id=paper_id, question_id=question.id, review_type="TEST"))
+        db.add(PipelineTask(paper_id=paper_id, status="QUEUED", source="SINGLE"))
+        db.commit()
+
+        result = PaperPipelineService(
+            db=db,
+            storage=storage,
+            mineu_service=MineuService(),
+            slice_service=SliceService(),
+            match_service=MatchService(LLMGateway()),
+        ).hard_delete_paper(paper_id)
+
+        assert result["deleted_file_count"] >= 9
+        assert db.get(Paper, paper_id) is None
+        assert db.execute(select(AnswerSheet).where(AnswerSheet.paper_id == paper_id)).scalar_one_or_none() is None
+        assert db.execute(select(ConversionJob).where(ConversionJob.paper_id == paper_id)).scalar_one_or_none() is None
+        assert db.execute(select(Question).where(Question.paper_id == paper_id)).scalar_one_or_none() is None
+        assert db.execute(select(PipelineTask).where(PipelineTask.paper_id == paper_id)).scalar_one_or_none() is None
+        assert not storage.exists("raw/paper.pdf")
+        assert not storage.exists("raw/answer.pdf")
+        assert not storage.exists(f"{mineu_prefix}/images/demo.png")
+        assert not storage.exists(f"{slice_prefix}/question.md")
 
 
 def test_pipeline_task_queue_claims_tasks_in_queued_order_and_marks_success(tmp_path, monkeypatch):

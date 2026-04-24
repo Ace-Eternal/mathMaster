@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import posixpath
+import stat
 from contextlib import contextmanager
 from pathlib import PurePosixPath
 
@@ -92,6 +93,31 @@ class SFTPFileStorageService(FileStorageService):
                 return True
             except FileNotFoundError:
                 return False
+
+    @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
+    def delete_prefix(self, target_prefix: str) -> int:
+        with self._client() as sftp:
+            return self._delete_remote_tree(sftp, self._full_path(target_prefix))
+
+    def _delete_remote_tree(self, sftp: paramiko.SFTPClient, remote_path: str) -> int:
+        try:
+            attributes = sftp.stat(remote_path)
+        except FileNotFoundError:
+            return 0
+        if not stat.S_ISDIR(attributes.st_mode):
+            sftp.remove(remote_path)
+            return 1
+
+        deleted_count = 0
+        for item in sftp.listdir_attr(remote_path):
+            child_path = posixpath.join(remote_path, item.filename)
+            if stat.S_ISDIR(item.st_mode):
+                deleted_count += self._delete_remote_tree(sftp, child_path)
+            else:
+                sftp.remove(child_path)
+                deleted_count += 1
+        sftp.rmdir(remote_path)
+        return deleted_count
 
     @retry(stop=stop_after_attempt(3), wait=wait_fixed(1))
     def mkdir_if_needed(self, target_prefix: str) -> None:

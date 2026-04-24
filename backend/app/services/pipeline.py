@@ -13,7 +13,21 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
-from app.models import AnswerSheet, ConversionJob, ImportJob, Paper, Question, QuestionAnswer, QuestionKnowledge, QuestionMethod
+from app.models import (
+    AnswerSheet,
+    ChatMessage,
+    ChatSession,
+    ConversionJob,
+    ImportJob,
+    Paper,
+    PipelineTask,
+    Question,
+    QuestionAnalysis,
+    QuestionAnswer,
+    QuestionKnowledge,
+    QuestionMethod,
+    ReviewRecord,
+)
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
@@ -1237,12 +1251,39 @@ class PaperPipelineService:
         self.db.commit()
         return self.get_paper(paper_id)
 
-    def soft_delete_paper(self, paper_id: int) -> Paper:
+    def hard_delete_paper(self, paper_id: int) -> dict[str, int]:
         paper = self.get_paper(paper_id)
-        paper.is_deleted = True
-        paper.deleted_at = datetime.utcnow()
+        running_task = self.db.execute(
+            select(PipelineTask).where(PipelineTask.paper_id == paper_id, PipelineTask.status == "RUNNING")
+        ).scalar_one_or_none()
+        if running_task:
+            raise HTTPException(status_code=409, detail="Paper pipeline is running and cannot be deleted")
+
+        file_paths = self._collect_paper_storage_paths(paper)
+        prefixes = [build_storage_key("mineu", str(paper_id)), build_storage_key("slices", str(paper_id))]
+        deleted_file_count = self._delete_storage_assets(file_paths=file_paths, prefixes=prefixes)
+
+        question_ids = list(self.db.execute(select(Question.id).where(Question.paper_id == paper_id)).scalars())
+        if question_ids:
+            session_ids = list(
+                self.db.execute(select(ChatSession.id).where(ChatSession.question_id.in_(question_ids))).scalars()
+            )
+            if session_ids:
+                self.db.query(ChatMessage).filter(ChatMessage.session_id.in_(session_ids)).delete(synchronize_session=False)
+            self.db.query(ChatSession).filter(ChatSession.question_id.in_(question_ids)).delete(synchronize_session=False)
+            self.db.query(QuestionMethod).filter(QuestionMethod.question_id.in_(question_ids)).delete(synchronize_session=False)
+            self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id.in_(question_ids)).delete(synchronize_session=False)
+            self.db.query(QuestionAnalysis).filter(QuestionAnalysis.question_id.in_(question_ids)).delete(synchronize_session=False)
+            self.db.query(QuestionAnswer).filter(QuestionAnswer.question_id.in_(question_ids)).delete(synchronize_session=False)
+
+        self.db.query(ReviewRecord).filter(ReviewRecord.paper_id == paper_id).delete(synchronize_session=False)
+        self.db.query(Question).filter(Question.paper_id == paper_id).delete(synchronize_session=False)
+        self.db.query(AnswerSheet).filter(AnswerSheet.paper_id == paper_id).delete(synchronize_session=False)
+        self.db.query(ConversionJob).filter(ConversionJob.paper_id == paper_id).delete(synchronize_session=False)
+        self.db.query(PipelineTask).filter(PipelineTask.paper_id == paper_id).delete(synchronize_session=False)
+        self.db.query(Paper).filter(Paper.id == paper_id).delete(synchronize_session=False)
         self.db.commit()
-        return self.get_paper(paper_id)
+        return {"deleted_file_count": deleted_file_count}
 
     def restore_paper(self, paper_id: int) -> Paper:
         paper = self.get_paper(paper_id)
@@ -1677,6 +1718,27 @@ class PaperPipelineService:
         papers = list(self.db.execute(stmt).scalars())
         self._decorate_papers(papers)
         return papers
+
+    def _collect_paper_storage_paths(self, paper: Paper) -> set[str]:
+        paths = {paper.paper_pdf_path}
+        if paper.answer_sheet and paper.answer_sheet.answer_pdf_path:
+            paths.add(paper.answer_sheet.answer_pdf_path)
+        for job in paper.conversion_jobs:
+            paths.update(path for path in [job.markdown_path, job.json_path, job.raw_response_path] if path)
+        for question in paper.questions:
+            paths.update(path for path in [question.question_md_path, question.question_json_path] if path)
+            if question.answer:
+                paths.update(path for path in [question.answer.answer_md_path, question.answer.answer_json_path] if path)
+        return {path for path in paths if path}
+
+    def _delete_storage_assets(self, *, file_paths: set[str], prefixes: list[str]) -> int:
+        deleted_count = 0
+        for path in sorted(file_paths):
+            if self.storage.delete_file(path):
+                deleted_count += 1
+        for prefix in prefixes:
+            deleted_count += self.storage.delete_prefix(prefix)
+        return deleted_count
 
     def _decorate_papers(self, papers: list[Paper]) -> None:
         status_changed = False

@@ -40,6 +40,17 @@ class LocalFileStorageService(FileStorageService):
             return True
         return False
 
+    def delete_prefix(self, target_prefix: str) -> int:
+        path = self._resolve(target_prefix)
+        if not path.exists():
+            return 0
+        if path.is_file():
+            path.unlink()
+            return 1
+        deleted_count = sum(1 for item in path.rglob("*") if item.is_file())
+        shutil.rmtree(path)
+        return deleted_count
+
     def mkdir_if_needed(self, target_prefix: str) -> None:
         self._resolve(target_prefix).mkdir(parents=True, exist_ok=True)
 

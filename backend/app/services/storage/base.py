@@ -20,6 +20,9 @@ class FileStorageService(ABC):
     def delete_file(self, target_key: str) -> bool: ...
 
     @abstractmethod
+    def delete_prefix(self, target_prefix: str) -> int: ...
+
+    @abstractmethod
     def mkdir_if_needed(self, target_prefix: str) -> None: ...
 
     @abstractmethod

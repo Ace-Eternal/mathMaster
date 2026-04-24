@@ -12,6 +12,7 @@ defineProps<{
 
 const emit = defineEmits<{
   rerun: [paperId: number]
+  deleteTask: [paperId: number, title: string]
 }>()
 
 const formatTime = (value: string | null) => {
@@ -26,6 +27,8 @@ const actionText = (row: TaskListItem) => {
   if (row.queueStatus === 'RUNNING') return '运行中'
   return '重新运行'
 }
+
+const canDeleteTask = (row: TaskListItem) => row.stage === '待运行' && Boolean(row.paperId) && !row.isTransient
 </script>
 
 <template>
@@ -106,6 +109,14 @@ const actionText = (row: TaskListItem) => {
               @click="emit('rerun', row.paperId)"
             >
               {{ actionText(row) }}
+            </el-button>
+            <el-button
+              v-if="canDeleteTask(row)"
+              text
+              type="danger"
+              @click="emit('deleteTask', row.paperId!, row.title)"
+            >
+              删除任务
             </el-button>
           </div>
         </template>

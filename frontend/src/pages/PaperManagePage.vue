@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { onMounted, reactive, ref } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
 import ExpandableText from '../components/ExpandableText.vue'
 
@@ -20,7 +20,6 @@ const filters = reactive({
   term: '',
   status: '',
   has_answer: undefined as boolean | undefined,
-  include_deleted: false,
 })
 
 const form = reactive({
@@ -37,9 +36,9 @@ const form = reactive({
 const loadPapers = async () => {
   loading.value = true
   try {
-    const params: Record<string, any> = { include_deleted: filters.include_deleted }
+    const params: Record<string, any> = {}
     Object.entries(filters).forEach(([key, value]) => {
-      if (value !== '' && value !== undefined && key !== 'include_deleted') params[key] = value
+      if (value !== '' && value !== undefined) params[key] = value
     })
     const { data } = await api.get('/papers/manage', { params })
     papers.value = data
@@ -93,15 +92,14 @@ const savePaper = async () => {
   }
 }
 
-const softDelete = async (paperId: number) => {
+const deletePaper = async (paperId: number) => {
+  await ElMessageBox.confirm('确认彻底删除这份试卷吗？试卷、答案和已生成的解析/切片文件都会被删除。', '删除试卷', {
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    type: 'warning',
+  })
   await api.delete(`/papers/${paperId}`)
-  ElMessage.success('试卷已软删除。')
-  await loadPapers()
-}
-
-const restore = async (paperId: number) => {
-  await api.post(`/papers/${paperId}/restore`)
-  ElMessage.success('试卷已恢复。')
+  ElMessage.success('试卷及关联文件已删除。')
   await loadPapers()
 }
 
@@ -143,7 +141,7 @@ onMounted(loadPapers)
       <div>
         <div class="page-title">试卷管理</div>
         <div class="page-subtitle">
-          在这里查看全部试卷、编辑元数据、修正流程状态、软删除或恢复试卷，并处理答案绑定。
+          在这里查看全部试卷、编辑元数据、修正流程状态、删除试卷，并处理答案绑定。
         </div>
       </div>
       <div class="action-row">
@@ -171,9 +169,6 @@ onMounted(loadPapers)
         <el-form-item label="状态">
           <el-input v-model="filters.status" placeholder="如：RAW / SLICED" />
         </el-form-item>
-        <el-form-item label="已删除">
-          <el-switch v-model="filters.include_deleted" />
-        </el-form-item>
         <el-form-item class="paper-filter-actions">
           <el-button type="primary" @click="loadPapers">筛选</el-button>
         </el-form-item>
@@ -182,16 +177,30 @@ onMounted(loadPapers)
 
     <section class="panel paper-table-panel">
       <el-table class="paper-manage-table" :data="papers" v-loading="loading">
-        <el-table-column prop="title" label="标题" min-width="220" />
-        <el-table-column prop="year" label="年份" width="90" />
-        <el-table-column prop="region" label="地区" width="100" />
-        <el-table-column prop="grade_level" label="年级" width="100" />
-        <el-table-column prop="term" label="学期" width="100" />
-        <el-table-column prop="status" label="状态" width="130" />
-        <el-table-column label="答案" width="110">
-          <template #default="{ row }">{{ row.answer_sheet?.has_answer ? '已绑定' : '缺失' }}</template>
+        <el-table-column label="试卷信息" min-width="280">
+          <template #default="{ row }">
+            <div class="paper-title-cell">
+              <div class="paper-title-text">{{ row.title }}</div>
+              <div class="paper-meta-list">
+                <span>年份：{{ row.year || '-' }}</span>
+                <span>地区：{{ row.region || '-' }}</span>
+                <span>年级：{{ row.grade_level || '-' }}</span>
+                <span>学期：{{ row.term || '-' }}</span>
+              </div>
+            </div>
+          </template>
         </el-table-column>
-        <el-table-column prop="pending_review_count" label="待审核" width="100" />
+        <el-table-column label="流程状态" min-width="220">
+          <template #default="{ row }">
+            <div class="status-stack">
+              <span class="status-code">{{ row.status }}</span>
+              <span :class="['answer-state', row.answer_sheet?.has_answer ? 'answer-state--ok' : 'answer-state--missing']">
+                {{ row.answer_sheet?.has_answer ? '答案已绑定' : '答案缺失' }}
+              </span>
+              <span class="review-count">待审核 {{ row.pending_review_count || 0 }} 道</span>
+            </div>
+          </template>
+        </el-table-column>
         <el-table-column label="最近错误" min-width="260">
           <template #default="{ row }">
             <ExpandableText
@@ -202,15 +211,14 @@ onMounted(loadPapers)
             />
           </template>
         </el-table-column>
-        <el-table-column label="操作" min-width="300">
+        <el-table-column label="操作" width="210">
           <template #default="{ row }">
             <div class="paper-table-actions">
               <RouterLink :to="`/papers/${row.id}`"><el-button text>详情</el-button></RouterLink>
               <el-button text @click="openEdit(row)">编辑</el-button>
               <el-button text type="primary" @click="rerun(row.id)">重跑</el-button>
               <el-button v-if="row.answer_sheet?.has_answer" text type="warning" @click="unbindAnswer(row.id)">解绑答案</el-button>
-              <el-button v-if="!row.is_deleted" text type="danger" @click="softDelete(row.id)">软删除</el-button>
-              <el-button v-else text type="success" @click="restore(row.id)">恢复</el-button>
+              <el-button text type="danger" @click="deletePaper(row.id)">删除</el-button>
             </div>
           </template>
         </el-table-column>
@@ -298,12 +306,79 @@ onMounted(loadPapers)
   align-items: flex-end;
 }
 
-.paper-table-panel {
-  overflow-x: auto;
-}
-
 .paper-manage-table {
   width: 100%;
+}
+
+.paper-manage-table :deep(.el-table__cell) {
+  vertical-align: top;
+  padding: 16px 0;
+}
+
+.paper-title-cell {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.paper-title-text {
+  color: var(--mm-text);
+  font-size: 15px;
+  font-weight: 700;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.paper-meta-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  color: var(--mm-text-soft);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.status-stack {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.status-code,
+.answer-state,
+.review-count {
+  border-radius: 999px;
+  padding: 6px 10px;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.2;
+  overflow-wrap: anywhere;
+}
+
+.status-code {
+  background: rgba(63, 109, 246, 0.08);
+  color: #2f56c8;
+}
+
+.answer-state {
+  background: rgba(242, 153, 74, 0.12);
+  color: #a05c0c;
+}
+
+.answer-state--ok {
+  background: rgba(40, 167, 69, 0.09);
+  color: #1d7a37;
+}
+
+.answer-state--missing {
+  background: rgba(242, 153, 74, 0.12);
+  color: #a05c0c;
+}
+
+.review-count {
+  background: var(--mm-soft);
+  color: var(--mm-text-soft);
 }
 
 .paper-table-actions {
@@ -315,5 +390,17 @@ onMounted(loadPapers)
 
 .paper-table-actions :deep(.el-button) {
   margin-left: 0;
+}
+
+@media (max-width: 820px) {
+  .paper-manage-table :deep(.el-table__cell) {
+    padding: 14px 0;
+  }
+
+  .paper-meta-list,
+  .status-stack,
+  .paper-table-actions {
+    gap: 6px 8px;
+  }
 }
 </style>

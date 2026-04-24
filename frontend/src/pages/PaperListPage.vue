@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
 import TaskOverviewCards from '../components/TaskOverviewCards.vue'
 import TaskStatusList from '../components/TaskStatusList.vue'
@@ -402,6 +402,25 @@ const runImportedBatch = async () => {
   }
 }
 
+const deletePendingTask = async (paperId: number, title: string) => {
+  if (isPaperRunning(paperId)) {
+    ElMessage.info('该试卷已在队列中，不能删除待运行任务。')
+    return
+  }
+  await ElMessageBox.confirm(`确认彻底删除待运行任务“${title}”吗？试卷、答案和已生成的解析/切片文件都会被删除。`, '删除待运行任务', {
+    confirmButtonText: '删除',
+    cancelButtonText: '取消',
+    type: 'warning'
+  })
+  try {
+    await api.delete(`/papers/${paperId}`)
+    ElMessage.success('待运行任务及关联文件已删除。')
+    await loadPapers()
+  } catch (error: any) {
+    ElMessage.error(errorMessage(error, '删除待运行任务失败。'))
+  }
+}
+
 const applyPipelineTaskState = (paperTask: TaskListItem, task?: PipelineTaskItem): TaskListItem => {
   if (!task) return paperTask
   if (task.status === 'QUEUED') {
@@ -726,7 +745,13 @@ onBeforeUnmount(stopAutoRefresh)
     </section>
 
     <TaskOverviewCards :summary="summary" />
-    <TaskStatusList :items="taskItems" :loading="loading" :running-paper-ids="activePipelinePaperIds" @rerun="runPipeline" />
+    <TaskStatusList
+      :items="taskItems"
+      :loading="loading"
+      :running-paper-ids="activePipelinePaperIds"
+      @rerun="runPipeline"
+      @delete-task="deletePendingTask"
+    />
   </div>
 </template>
 
