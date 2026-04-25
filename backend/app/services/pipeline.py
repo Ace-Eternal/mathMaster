@@ -229,16 +229,22 @@ class SliceService:
             "answer_marker_hints": marker_hints,
             "markdown_excerpt": markdown_text[:6000],
         }
-        result = llm_gateway.structured_output(scenario="full_answer_boundary", payload=payload)
-        items = result.get("items") or []
-        if not items and marker_hints:
-            retry_payload = {
-                **payload,
-                "blocks": [block for block in payload["blocks"] if block["has_question_marker"] or block["type"] in {"table", "image"}],
-            }
-            result = llm_gateway.structured_output(scenario="full_answer_boundary", payload=retry_payload)
+        try:
+            result = llm_gateway.structured_output(scenario="full_answer_boundary", payload=payload)
             items = result.get("items") or []
-        return self._normalize_answer_boundaries(items=items, blocks=blocks)
+            if not items and marker_hints:
+                retry_payload = {
+                    **payload,
+                    "blocks": [block for block in payload["blocks"] if block["has_question_marker"] or block["type"] in {"table", "image"}],
+                }
+                result = llm_gateway.structured_output(scenario="full_answer_boundary", payload=retry_payload)
+                items = result.get("items") or []
+            boundaries = self._normalize_answer_boundaries(items=items, blocks=blocks)
+            if boundaries:
+                return boundaries
+        except Exception:  # noqa: BLE001
+            pass
+        return self._detect_answer_boundaries_from_local_markers(blocks)
 
     def build_question_slices(
         self,
@@ -674,7 +680,7 @@ class SliceService:
     def _collect_answer_marker_hints(self, blocks: list[NormalizedBlock]) -> list[dict[str, Any]]:
         hints: list[dict[str, Any]] = []
         for block in blocks:
-            question_no = self._extract_question_no(block.text)
+            question_no = self._extract_answer_marker_no(block.text)
             if question_no or block.block_type == "table":
                 hints.append(
                     {
@@ -815,6 +821,88 @@ class SliceService:
                 )
             )
         return boundaries
+
+    def _detect_answer_boundaries_from_local_markers(self, blocks: list[NormalizedBlock]) -> list[AnswerBoundaryItem]:
+        boundaries: list[AnswerBoundaryItem] = []
+        current_no: str | None = None
+        current_start_pos: int | None = None
+
+        def flush(end_pos: int) -> None:
+            nonlocal current_no, current_start_pos
+            if current_no is None or current_start_pos is None or end_pos < current_start_pos:
+                return
+            selected = blocks[current_start_pos : end_pos + 1]
+            if not selected:
+                return
+            boundaries.append(
+                AnswerBoundaryItem(
+                    candidate_id=f"answer-{len(boundaries) + 1}",
+                    answer_question_no=current_no,
+                    start_block_index=selected[0].block_index,
+                    end_block_index=selected[-1].block_index,
+                    page_start=selected[0].page_idx,
+                    page_end=selected[-1].page_idx,
+                    has_sub_questions=any(SUBQUESTION_PATTERN.search(block.text) for block in selected),
+                    need_manual_review=False,
+                    review_reason=None,
+                )
+            )
+
+        for position, block in enumerate(blocks):
+            if block.block_type == "table":
+                for table_no in self._extract_answer_table_numbers(block.text):
+                    boundaries.append(
+                        AnswerBoundaryItem(
+                            candidate_id=f"answer-{len(boundaries) + 1}",
+                            answer_question_no=table_no,
+                            start_block_index=block.block_index,
+                            end_block_index=block.block_index,
+                            page_start=block.page_idx,
+                            page_end=block.page_idx,
+                            has_sub_questions=False,
+                            need_manual_review=False,
+                            review_reason=None,
+                        )
+                    )
+                continue
+
+            question_no = self._extract_answer_marker_no(block.text)
+            if not question_no:
+                continue
+            if current_no is None:
+                current_no = question_no
+                current_start_pos = position
+                continue
+            if question_no == current_no:
+                continue
+            flush(position - 1)
+            current_no = question_no
+            current_start_pos = position
+
+        if current_no is not None and current_start_pos is not None:
+            flush(len(blocks) - 1)
+
+        return boundaries
+
+    @staticmethod
+    def _extract_answer_table_numbers(text: str) -> list[str]:
+        question_rows = [match.group("numbers") for match in re.finditer(r"题号(?P<numbers>.*?)(?=答案)", text)]
+        number_source = " ".join(question_rows) if question_rows else text
+        numbers = re.findall(r"\b\d+\b", number_source)
+        deduped: list[str] = []
+        for number in numbers:
+            if number not in deduped:
+                deduped.append(number)
+        return deduped
+
+    @staticmethod
+    def _extract_answer_marker_no(text: str) -> str | None:
+        if not text or SliceService._is_score_only_answer_block(text):
+            return None
+        match = re.match(r"^\s*(?:第?\s*)?(\d+)\s*[题、.．)]", text)
+        if match:
+            return match.group(1)
+        return None
 
     @staticmethod
     def _is_multi_answer_summary_block(text: str, question_no: str) -> bool:

@@ -635,6 +635,50 @@ def test_full_answer_boundary_normalization_requires_start_and_end_block_indices
         )
 
 
+def test_answer_boundary_detection_falls_back_to_local_markers_when_llm_contract_fails():
+    class FailingBoundaryGateway:
+        def structured_output(self, *, scenario: str, payload: dict[str, object]) -> dict[str, object]:
+            assert scenario == "full_answer_boundary"
+            raise RuntimeError("full_answer_boundary must return an object with items array only")
+
+    service = SliceService()
+    document_json = {
+        "blocks": [
+            {
+                "type": "table",
+                "table_body": (
+                    "<table><tr><td>题号</td><td>1</td><td>2</td></tr>"
+                    "<tr><td>答案</td><td>A</td><td>D</td></tr>"
+                    "<tr><td>题号</td><td>7</td><td>8</td></tr>"
+                    "<tr><td>答案</td><td>B</td><td>C</td></tr></table>"
+                ),
+                "page_idx": 0,
+            },
+            {"type": "text", "text": "17. $e - 2$", "page_idx": 1},
+            {"type": "text", "text": "18. 45", "page_idx": 1},
+            {"type": "text", "text": "3分", "page_idx": 1},
+            {"type": "text", "text": "18题补充说明", "page_idx": 1},
+        ]
+    }
+
+    boundaries = service.detect_answer_boundaries(
+        document_json=document_json,
+        markdown_text="",
+        llm_gateway=FailingBoundaryGateway(),  # type: ignore[arg-type]
+    )
+
+    assert [item.answer_question_no for item in boundaries] == ["1", "2", "7", "8", "17", "18"]
+    assert [(item.start_block_index, item.end_block_index) for item in boundaries] == [
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (0, 0),
+        (100, 100),
+        (200, 400),
+    ]
+    assert all(item.need_manual_review is False for item in boundaries)
+
+
 def test_global_answer_match_normalization_does_not_default_to_first_candidate():
     gateway = LLMGateway()
     normalized = gateway._normalize_match_result(

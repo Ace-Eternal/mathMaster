@@ -138,3 +138,20 @@
 - 撤回：删除前端 `markdownMath.ts`、`check-markdown-math.mjs` 和 `check:markdown-math` 脚本，`MarkdownContent.vue` 恢复为组件内基础 KaTeX 分隔符规范化。
 - 保留：后端 `normalize_answer_text_for_markdown()` 入库规范化仍保留，确保 `/review/88` 这类 JSON answer map 不再进入数据库原始答案文本。
 - 验证：前端构建 `npm run build` 通过；后端完整测试 `uv run pytest`，59 passed。
+
+## 2026-04-24 21:35:00 +08:00 - 答案边界本地兜底验证
+
+- 执行者：Codex
+- 根因：`full_answer_boundary` 只通过 `response_format=json_object` 约束模型，模型仍可能返回 `answers`、`sections`、`title` 等旧式 JSON 对象；严格校验拒绝后，`detect_answer_boundaries()` 没有回退到本地答案 block 标记。
+- 修复：`SliceService.detect_answer_boundaries()` 在 LLM 失败或无有效边界时使用 MineU 归一化 block 本地兜底；表格答案按 `题号/答案` 行展开为逐题候选，解答题按显式题号行切分。
+- 修复：答案兜底使用更严格的题号起点识别，排除 `3分`、`7分`、`10分` 等评分行被误判为题号。
+- 真实数据验证：`data/mineu/30/answer.json` 本地兜底识别 23 个答案边界；`data/mineu/31/answer.json` 本地兜底识别 19 个答案边界。
+- 测试：针对性测试 `uv run pytest tests/test_storage_and_slice.py -k "answer_boundary_detection_falls_back"`，1 passed；后端完整测试 `uv run pytest`，60 passed。
+
+## 2026-04-24 22:05:00 +08:00 - Markdown 数学溢出布局验证
+
+- 执行者：Codex
+- 根因：`MarkdownContent` 只对 `pre` 和 `.katex-display` 设置横向滚动，普通段落内的 inline KaTeX 长公式仍会形成不可断行内容，导致 `/review/174` 这类长答案行视觉上越过答案卡片并压到右侧 PDF 区域。
+- 修复：在通用 `MarkdownContent` 内约束 Markdown 根容器、段落、列表、代码块、表格、inline/display KaTeX 的最大宽度；长公式和表格在各自块内横向滚动，不再撑破调用页面的栅格。
+- 覆盖范围：该修复作用于所有复用 `MarkdownContent` 的页面，包括 `/review`、题目详情页、题库搜索结果和模板预览，不针对单个题号硬编码。
+- 验证：新增 `npm run check:markdown-layout`，先在旧样式下失败，修复后通过；前端构建 `npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。

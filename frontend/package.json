@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "vue-tsc --noEmit && vite build",
+    "check:markdown-layout": "node scripts/check-markdown-layout.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

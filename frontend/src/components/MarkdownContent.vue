@@ -53,17 +53,27 @@ const renderedHtml = computed(() => {
 
 <style scoped>
 .markdown-content {
+  max-width: 100%;
+  min-width: 0;
+  overflow-x: hidden;
   line-height: 1.8;
   color: var(--mm-ink);
   word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .markdown-content :deep(p) {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
   margin: 0 0 12px;
+  padding-bottom: 2px;
 }
 
 .markdown-content :deep(ul),
 .markdown-content :deep(ol) {
+  max-width: 100%;
+  overflow-x: auto;
   margin: 0 0 12px;
   padding-left: 22px;
 }
@@ -81,6 +91,7 @@ const renderedHtml = computed(() => {
 }
 
 .markdown-content :deep(pre) {
+  max-width: 100%;
   overflow-x: auto;
   margin: 12px 0;
   padding: 12px 14px;
@@ -93,14 +104,31 @@ const renderedHtml = computed(() => {
   font-family: 'Consolas', 'Courier New', monospace;
 }
 
+.markdown-content :deep(table) {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+}
+
 .markdown-content :deep(img) {
   max-width: 100%;
   border-radius: 12px;
 }
 
+.markdown-content :deep(.katex) {
+  max-width: 100%;
+}
+
 .markdown-content :deep(.katex-display) {
+  max-width: 100%;
   overflow-x: auto;
   overflow-y: hidden;
   padding: 6px 0;
+}
+
+.markdown-content :deep(.katex-display > .katex) {
+  overflow-x: auto;
+  overflow-y: hidden;
 }
 </style>
