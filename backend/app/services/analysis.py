@@ -77,19 +77,10 @@ class KnowledgeAnalysisService:
             if generic_points:
                 major_points = generic_points[:1]
                 minor_points = generic_points[1:]
-        inferred_major, inferred_minor, inferred_methods = self._infer_from_question(question=question, result=normalized)
-        if not major_points and inferred_major:
-            major_points = inferred_major
-        if not minor_points and inferred_minor:
-            minor_points = inferred_minor
         solution_methods = self._normalize_solution_methods(normalized.get("solution_methods"))
-        if not solution_methods and inferred_methods:
-            solution_methods = inferred_methods
         explanation_md = str(normalized.get("explanation_md") or "").strip()
         if not explanation_md:
             explanation_md = self._build_explanation_from_packy_result(normalized)
-        if not explanation_md:
-            explanation_md = self._build_explanation_md(major_points=major_points, minor_points=minor_points, solution_methods=solution_methods)
         normalized["major_knowledge_points"] = major_points
         normalized["minor_knowledge_points"] = minor_points
         normalized["solution_methods"] = solution_methods
@@ -117,70 +108,6 @@ class KnowledgeAnalysisService:
         if conclusion:
             parts.append(conclusion)
         return "\n\n".join(part for part in parts if part).strip()
-
-    def _infer_from_question(self, *, question: Question, result: dict) -> tuple[list[str], list[str], list[str]]:
-        stem_text = str(question.stem_text or "")
-        answer_text = str(question.answer.answer_text if question.answer else "")
-        combined = "\n".join(
-            part for part in [
-                stem_text,
-                answer_text,
-                str(result.get("explanation_md") or ""),
-                json.dumps(result.get("analysis") or {}, ensure_ascii=False),
-            ] if part
-        )
-        major_points: list[str] = []
-        minor_points: list[str] = []
-        methods: list[str] = []
-
-        def add_major(name: str) -> None:
-            if name and name not in major_points:
-                major_points.append(name)
-
-        def add_minor(name: str) -> None:
-            if name and name not in minor_points:
-                minor_points.append(name)
-
-        def add_method(name: str) -> None:
-            if name and name not in methods:
-                methods.append(name)
-
-        if any(keyword in combined for keyword in ("概率", "互斥", "对立事件", "独立", "至少1人", "无人击中")):
-            add_major("概率与统计")
-            add_minor("互斥事件与对立事件")
-            add_minor("独立事件概率")
-            add_method("概率计算")
-        if any(keyword in combined for keyword in ("频率分布直方图", "组中值", "百分位数", "众数")):
-            add_major("概率与统计")
-            add_minor("频率分布直方图")
-            if "组中值" in combined:
-                add_minor("组中值估计")
-            add_method("频率分布直方图分析")
-        if any(keyword in combined for keyword in ("向量", "投影向量", "平行", "垂直", "坐标")):
-            add_major("平面向量")
-            if "平行" in combined:
-                add_minor("向量平行的坐标表示")
-            if "投影" in combined:
-                add_minor("向量投影")
-            add_method("向量运算")
-        if any(keyword in combined for keyword in ("复数", "共轭复数", "复平面")):
-            add_major("复数")
-            add_minor("复数的乘法运算")
-            add_method("复数运算")
-        if any(keyword in combined for keyword in ("余弦定理", "正弦定理", "三角形", "sin", "cos", "tan", "角")):
-            add_major("三角函数与解三角形")
-            if "余弦定理" in combined:
-                add_minor("余弦定理")
-            if "tan" in combined or "正切" in combined:
-                add_minor("同角三角函数基本关系")
-            add_method("三角变换")
-        if any(keyword in combined for keyword in ("正方体", "平面", "直线", "二面角", "立体几何", "空间")):
-            add_major("立体几何")
-            add_minor("线面位置关系")
-            add_method("空间几何推理")
-        if not major_points:
-            add_major("高中数学综合")
-        return major_points[:3], minor_points[:5], methods[:3]
 
     def _validate_analysis_result(self, *, result: dict, question: Question) -> None:
         major_points = self._normalize_string_list(result.get("major_knowledge_points"))
@@ -262,25 +189,14 @@ class KnowledgeAnalysisService:
         return trimmed[:24]
 
     @staticmethod
-    def _build_explanation_md(*, major_points: list[str], minor_points: list[str], solution_methods: list[str]) -> str:
-        sections: list[str] = []
-        if major_points:
-            sections.append("主要知识点：" + "、".join(major_points))
-        if minor_points:
-            sections.append("次级知识点：" + "、".join(minor_points))
-        if solution_methods:
-            sections.append("推荐解法：" + "、".join(solution_methods))
-        return "\n\n".join(sections)
-
-    @staticmethod
-    def _normalize_confidence(value: object) -> float:
+    def _normalize_confidence(value: object) -> float | None:
         try:
             if value is None or value == "":
-                return 0.75
+                return None
             confidence = float(value)
             return max(0.0, min(confidence, 1.0))
         except (TypeError, ValueError):
-            return 0.75
+            return None
 
     def _get_or_create_knowledge_point(self, *, name: str, level: int) -> KnowledgePoint:
         normalized_name = str(name or "").strip()

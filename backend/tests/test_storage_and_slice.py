@@ -47,6 +47,8 @@ def test_llm_prompts_pin_project_output_contracts():
     slice_prompt = (PROMPT_DIR / "slice_prompt.md").read_text(encoding="utf-8")
     paper_boundary_prompt = (PROMPT_DIR / "full_paper_boundary_prompt.md").read_text(encoding="utf-8")
     answer_boundary_prompt = (PROMPT_DIR / "full_answer_boundary_prompt.md").read_text(encoding="utf-8")
+    analysis_prompt = (PROMPT_DIR / "analysis_prompt.md").read_text(encoding="utf-8")
+    chat_prompt = (PROMPT_DIR / "chat_system_prompt.md").read_text(encoding="utf-8")
 
     assert "字段名错误会导致任务失败" in slice_prompt
     assert "不要输出 `answer_candidate_id`" in slice_prompt
@@ -60,6 +62,14 @@ def test_llm_prompts_pin_project_output_contracts():
     assert "不要输出 `answers`、`sections`、`solutions`" in answer_boundary_prompt
     assert "每个答案对象必须且只能包含示例中的 8 个字段" in answer_boundary_prompt
     assert '"answer_question_no"' in answer_boundary_prompt
+
+    assert "`explanation_md`: 中文 Markdown，必须能被前端 `MarkdownContent` 渲染" in analysis_prompt
+    assert "$\\\\log_2(2^x+t)-x$" in analysis_prompt
+    assert "不要在 `explanation_md` 中输出裸公式" in analysis_prompt
+
+    assert "输出使用 Markdown；所有数学表达式必须写成可渲染的 LaTeX" in chat_prompt
+    assert "$\\\\log_2(2^x+t)-x$" in chat_prompt
+    assert "不要输出裸公式 `log_2(2^x+t)-x`" in chat_prompt
 
 
 def make_pipeline_queue_session(tmp_path):
@@ -917,6 +927,7 @@ def test_analysis_service_normalizes_generic_knowledge_points_and_long_method_se
                         "根据频率分布直方图中小矩形面积等于频率，先求各组频率。",
                         "再用组中值乘对应频率估计平均数。",
                     ],
+                    "explanation_md": "按频率分布直方图读取频率，再用组中值估计平均数。",
                     "confidence": 0.9,
                     "need_manual_review": False,
                 }
@@ -926,10 +937,10 @@ def test_analysis_service_normalizes_generic_knowledge_points_and_long_method_se
         assert payload["major_knowledge_points"] == ["概率与统计"]
         assert payload["minor_knowledge_points"] == ["频率分布直方图", "组中值估计"]
         assert payload["solution_methods"] == ["频率分布直方图分析", "组中值估计"]
-        assert "主要知识点" in (analysis.explanation_md or "")
+        assert analysis.explanation_md == "按频率分布直方图读取频率，再用组中值估计平均数。"
 
 
-def test_analysis_service_infers_knowledge_points_from_packy_solution_schema():
+def test_analysis_service_rejects_packy_solution_schema_without_explicit_knowledge_points():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
     with Session(engine) as db:
@@ -963,12 +974,11 @@ def test_analysis_service_infers_knowledge_points_from_packy_solution_schema():
                     },
                 }
 
-        analysis = KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
-        payload = json.loads(analysis.analysis_json)
-        assert payload["major_knowledge_points"] == ["概率与统计"]
-        assert "互斥事件与对立事件" in payload["minor_knowledge_points"]
-        assert "概率计算" in payload["solution_methods"]
-        assert "正确选项为 A、D。" in (analysis.explanation_md or "")
+        with pytest.raises(ValueError, match="缺少知识点"):
+            KnowledgeAnalysisService(db, StubGateway()).analyze_question(question.id)
+        assert db.execute(select(QuestionAnalysis)).scalar_one_or_none() is None
+        assert list(db.execute(select(QuestionKnowledge)).scalars()) == []
+        assert list(db.execute(select(QuestionMethod)).scalars()) == []
 
 
 def test_llm_gateway_normalizes_packy_analysis_shape():
@@ -1365,6 +1375,40 @@ def test_search_service_filters_questions_by_manual_tags():
         assert result["items"][0]["id"] == question.id
 
 
+def test_search_service_supports_any_and_all_keyword_modes():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        function_question = Question(paper_id=paper.id, question_no="1", stem_text="函数 单调性 与导数", review_status="APPROVED")
+        vector_question = Question(paper_id=paper.id, question_no="2", stem_text="空间向量 垂直关系", review_status="APPROVED")
+        mixed_question = Question(paper_id=paper.id, question_no="3", stem_text="函数 与 空间向量 综合", review_status="APPROVED")
+        db.add_all([function_question, vector_question, mixed_question])
+        db.commit()
+
+        any_result = SearchService(db).search_questions(
+            keyword="函数 空间向量",
+            keyword_match_mode="any",
+            question_type=None,
+            year=None,
+            page=1,
+            page_size=20,
+        )
+        all_result = SearchService(db).search_questions(
+            keyword="函数 空间向量",
+            keyword_match_mode="all",
+            question_type=None,
+            year=None,
+            page=1,
+            page_size=20,
+        )
+
+        assert any_result["total"] == 3
+        assert [item["id"] for item in all_result["items"]] == [mixed_question.id]
+
+
 def test_dictionary_delete_cleans_question_links():
     engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
@@ -1457,6 +1501,9 @@ def test_chat_tutor_service_sends_image_parts_to_llm(tmp_path, monkeypatch):
         assert "标准答案" not in text_part["text"]
         assert "标准解析" not in text_part["text"]
         assert "当前提供给你的只有题目侧上下文，不保证包含标准答案或解析。" in StubGateway.captured_system_prompt
+        assert "所有数学表达式必须写成可渲染的 LaTeX" in StubGateway.captured_system_prompt
+        assert "$\\\\log_2(2^x+t)-x$" in StubGateway.captured_system_prompt
+        assert "不要输出裸公式 `log_2(2^x+t)-x`" in StubGateway.captured_system_prompt
         image_parts = [part for part in first_message["content"] if part.get("type") == "image_url"]
         assert len(image_parts) == 1
 

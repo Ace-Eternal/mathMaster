@@ -29,6 +29,26 @@ const questionImages = computed(() => detail.value?.assets?.question_images || [
 const answerImages = computed(() => detail.value?.assets?.answer_images || [])
 const knowledges = computed(() => detail.value?.knowledges || [])
 const methods = computed(() => detail.value?.methods || [])
+const parseNameList = (value: unknown) => {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((item: any) => {
+      if (item && typeof item === 'object') return String(item.name || item.label || item.title || '').trim()
+      return String(item || '').trim()
+    })
+    .filter(Boolean)
+}
+const analysisPayload = computed(() => {
+  if (!detail.value?.analysis?.analysis_json) return {}
+  try {
+    return JSON.parse(detail.value.analysis.analysis_json)
+  } catch {
+    return {}
+  }
+})
+const analysisMajorPoints = computed(() => parseNameList((analysisPayload.value as any).major_knowledge_points))
+const analysisMinorPoints = computed(() => parseNameList((analysisPayload.value as any).minor_knowledge_points))
+const analysisMethods = computed(() => parseNameList((analysisPayload.value as any).solution_methods))
 const activeSessionId = computed(() => session.value?.id ?? null)
 const isStreaming = computed(() => streamState.value === 'streaming')
 const isStopping = computed(() => streamState.value === 'stopping')
@@ -56,8 +76,8 @@ const load = async () => {
     )
   }
   tagForm.value = {
-    knowledge_point_ids: knowledges.value.map((item: any) => item.id),
-    solution_method_ids: methods.value.map((item: any) => item.id),
+    knowledge_point_ids: detail.value?.analysis ? knowledges.value.map((item: any) => item.id) : [],
+    solution_method_ids: detail.value?.analysis ? methods.value.map((item: any) => item.id) : [],
   }
 }
 
@@ -383,7 +403,9 @@ onBeforeUnmount(() => {
     <div class="grid cols-2">
       <section class="panel">
         <h3>题干</h3>
-        <MarkdownContent :content="detail.assets.question_md" />
+        <div class="detail-markdown-surface">
+          <MarkdownContent :content="detail.assets.question_md" />
+        </div>
 
         <div v-if="questionImages.length" class="image-stack">
           <h3>题目图片</h3>
@@ -399,7 +421,9 @@ onBeforeUnmount(() => {
         </div>
 
         <h3>答案</h3>
-        <MarkdownContent :content="detail.answer?.answer_text || detail.assets.answer_md" />
+        <div class="detail-markdown-surface">
+          <MarkdownContent :content="detail.answer?.answer_text || detail.assets.answer_md" />
+        </div>
 
         <div v-if="answerImages.length" class="image-stack">
           <h3>答案图片</h3>
@@ -418,16 +442,22 @@ onBeforeUnmount(() => {
       <section class="panel">
         <h3>分析结果</h3>
         <div v-if="detail.analysis">
-          <div v-if="knowledges.length" class="meta-group">
-            <div class="meta-label">知识点</div>
+          <div v-if="analysisMajorPoints.length" class="meta-group">
+            <div class="meta-label">主要知识点</div>
             <div class="tag-wrap">
-              <span v-for="item in knowledges" :key="`kp-${item.id}`" class="pill-tag">{{ item.name }}</span>
+              <span v-for="item in analysisMajorPoints" :key="`major-${item}`" class="pill-tag">{{ item }}</span>
             </div>
           </div>
-          <div v-if="methods.length" class="meta-group">
+          <div v-if="analysisMinorPoints.length" class="meta-group">
+            <div class="meta-label">次级知识点</div>
+            <div class="tag-wrap">
+              <span v-for="item in analysisMinorPoints" :key="`minor-${item}`" class="pill-tag">{{ item }}</span>
+            </div>
+          </div>
+          <div v-if="analysisMethods.length" class="meta-group">
             <div class="meta-label">推荐解法</div>
             <div class="tag-wrap">
-              <span v-for="item in methods" :key="`method-${item.id}`" class="pill-tag">{{ item.name }}</span>
+              <span v-for="item in analysisMethods" :key="`analysis-method-${item}`" class="pill-tag">{{ item }}</span>
             </div>
           </div>
           <MarkdownContent :content="detail.analysis.explanation_md" />
@@ -623,6 +653,31 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 14px;
   margin: 18px 0;
+}
+
+.detail-markdown-surface {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.detail-markdown-surface :deep(.markdown-content) {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  overflow-x: visible;
+}
+
+.detail-markdown-surface :deep(.markdown-content p),
+.detail-markdown-surface :deep(.markdown-content ul),
+.detail-markdown-surface :deep(.markdown-content ol),
+.detail-markdown-surface :deep(.markdown-content pre),
+.detail-markdown-surface :deep(.markdown-content table),
+.detail-markdown-surface :deep(.markdown-content .katex-display),
+.detail-markdown-surface :deep(.markdown-content .katex-display > .katex) {
+  max-width: none;
+  overflow-x: visible;
 }
 
 .meta-group {

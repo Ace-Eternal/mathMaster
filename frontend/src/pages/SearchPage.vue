@@ -5,6 +5,7 @@ import MarkdownContent from '../components/MarkdownContent.vue'
 
 const paperKeyword = ref('')
 const questionKeyword = ref('')
+const questionKeywordMatchMode = ref<'any' | 'all'>('any')
 const selectedYear = ref<number | null>(null)
 const selectedRegion = ref('')
 const selectedGradeLevel = ref('')
@@ -41,6 +42,7 @@ const searchQuestions = async () => {
     await api.get('/search/questions', {
       params: {
         keyword: questionKeyword.value,
+        keyword_match_mode: questionKeywordMatchMode.value,
         year: selectedYear.value || undefined,
         region: selectedRegion.value || undefined,
         grade_level: selectedGradeLevel.value || undefined,
@@ -82,6 +84,11 @@ const activeFilterSummary = computed(() =>
     selectedQuestionType.value ? `题型 ${selectedQuestionType.value}` : null,
     selectedReviewStatus.value ? `审核 ${selectedReviewStatus.value}` : null,
     selectedHasAnswer.value === null ? null : selectedHasAnswer.value ? '有答案' : '缺答案',
+    questionKeyword.value.trim()
+      ? questionKeywordMatchMode.value === 'all'
+        ? '关键词：全部满足'
+        : '关键词：任意满足'
+      : null,
   ].filter(Boolean)
 )
 </script>
@@ -114,7 +121,11 @@ const activeFilterSummary = computed(() =>
 
     <section class="panel">
       <h3>题目搜索</h3>
-      <el-input v-model="questionKeyword" placeholder="输入题干关键词" />
+      <el-input v-model="questionKeyword" placeholder="输入题干关键词，多个关键词用空格、逗号或换行分隔" type="textarea" :rows="3" />
+      <el-radio-group v-model="questionKeywordMatchMode" class="keyword-mode">
+        <el-radio-button label="any">任意关键词满足</el-radio-button>
+        <el-radio-button label="all">全部关键词满足</el-radio-button>
+      </el-radio-group>
       <div class="grid cols-2" style="margin-top: 12px">
         <el-input-number v-model="selectedYear" :min="2000" :max="2100" placeholder="年份" style="width: 100%" />
         <el-input v-model="selectedRegion" placeholder="地区，如浙江" />
@@ -200,6 +211,10 @@ const activeFilterSummary = computed(() =>
   gap: 6px;
   align-items: center;
   margin-top: 12px;
+}
+
+.keyword-mode {
+  margin-top: 10px;
 }
 
 .result-title {

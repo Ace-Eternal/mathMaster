@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select
+import re
+
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session, selectinload
 
 from app.models import Paper, Question, QuestionAnswer, QuestionKnowledge, QuestionMethod
@@ -54,6 +56,7 @@ class SearchService:
         sort_by: str = "updated_desc",
         page: int,
         page_size: int,
+        keyword_match_mode: str = "any",
     ):
         stmt = (
             select(Question, Paper)
@@ -61,8 +64,10 @@ class SearchService:
             .options(selectinload(Question.answer))
             .where(Paper.is_deleted.is_(False))
         )
-        if keyword:
-            stmt = stmt.where(Question.stem_text.like(f"%{keyword}%"))
+        keywords = self._split_keywords(keyword)
+        if keywords:
+            keyword_conditions = [Question.stem_text.like(f"%{item}%") for item in keywords]
+            stmt = stmt.where(and_(*keyword_conditions) if keyword_match_mode == "all" else or_(*keyword_conditions))
         if question_type:
             stmt = stmt.where(Question.question_type == question_type)
         if year:
@@ -110,3 +115,18 @@ class SearchService:
             for question, paper in rows
         ]
         return {"total": total, "items": items}
+
+    @staticmethod
+    def _split_keywords(keyword: str | None) -> list[str]:
+        if not keyword:
+            return []
+        parts = re.split(r"[\s,，、;；]+", keyword)
+        keywords: list[str] = []
+        seen: set[str] = set()
+        for part in parts:
+            item = part.strip()
+            if not item or item in seen:
+                continue
+            seen.add(item)
+            keywords.append(item)
+        return keywords

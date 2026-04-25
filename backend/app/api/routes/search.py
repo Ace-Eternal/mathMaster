@@ -23,6 +23,7 @@ def search_papers(
 @router.get("/questions", response_model=SearchResponse)
 def search_questions(
     keyword: str | None = None,
+    keyword_match_mode: str = Query(default="any", pattern="^(any|all)$"),
     question_type: str | None = None,
     year: int | None = None,
     region: str | None = None,
@@ -39,6 +40,7 @@ def search_questions(
 ):
     return SearchService(db).search_questions(
         keyword=keyword,
+        keyword_match_mode=keyword_match_mode,
         question_type=question_type,
         year=year,
         region=region,

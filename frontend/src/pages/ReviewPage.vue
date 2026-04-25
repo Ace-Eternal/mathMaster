@@ -179,8 +179,8 @@ onMounted(async () => {
               <h4>题目</h4>
               <div class="muted">上方修改原始文本，下方实时查看 Markdown 渲染。</div>
             </div>
-            <el-form-item label="题干原始文本">
-              <el-input v-model="form.stem_text" type="textarea" :rows="7" />
+            <el-form-item label="题干原始文本" class="question-raw-field">
+              <el-input v-model="form.stem_text" class="raw-textarea" type="textarea" :rows="7" />
             </el-form-item>
             <div v-if="questionImages.length" class="image-stack">
               <div v-for="(image, index) in questionImages" :key="`${index}-${image.src || image.caption || 'img'}`" class="image-card">
@@ -189,7 +189,7 @@ onMounted(async () => {
                 <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
               </div>
             </div>
-            <div class="preview-surface">
+            <div class="preview-surface question-preview-surface">
               <div class="surface-note" style="margin-bottom: 10px">当前题目渲染效果</div>
               <MarkdownContent :content="form.stem_text || detail.assets.question_md" />
             </div>
@@ -200,8 +200,8 @@ onMounted(async () => {
               <h4>答案</h4>
               <div class="muted">修改答案文本后，下方会实时显示最终渲染效果。</div>
             </div>
-            <el-form-item label="答案原始文本">
-              <el-input v-model="form.answer_text" type="textarea" :rows="6" />
+            <el-form-item label="答案原始文本" class="answer-raw-field">
+              <el-input v-model="form.answer_text" class="raw-textarea" type="textarea" :rows="6" />
             </el-form-item>
             <div v-if="answerImages.length" class="image-stack">
               <div v-for="(image, index) in answerImages" :key="`answer-${index}-${image.src || image.caption || 'img'}`" class="image-card">
@@ -210,7 +210,7 @@ onMounted(async () => {
                 <div class="muted" style="margin-top: 6px">页码：{{ image.page || '-' }} ｜ {{ image.caption || '无标题' }}</div>
               </div>
             </div>
-            <div class="preview-surface">
+            <div class="preview-surface answer-preview-surface">
               <div class="surface-note" style="margin-bottom: 10px">当前答案渲染效果</div>
               <MarkdownContent :content="form.answer_text || detail.assets.answer_md || '暂无答案片段'" />
             </div>
@@ -323,31 +323,76 @@ onMounted(async () => {
   grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
   gap: 18px;
   align-items: stretch;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .preview-panel,
 .pdf-panel {
   min-width: 0;
+  max-width: 100%;
   min-height: 720px;
   height: 100%;
+  overflow: hidden;
 }
 
 .pdf-panel {
   overflow: hidden;
 }
 
+.review-edit-form,
+.review-edit-form :deep(.el-form),
+.review-edit-form :deep(.el-form-item),
+.review-edit-form :deep(.el-form-item__content) {
+  min-width: 0;
+  max-width: 100%;
+}
+
 .review-edit-form :deep(.el-form-item) {
   margin-bottom: 16px;
+}
+
+.review-edit-form :deep(.el-input),
+.review-edit-form :deep(.el-select),
+.review-edit-form :deep(.el-textarea),
+.review-edit-form :deep(.el-input__wrapper),
+.review-edit-form :deep(.el-select__wrapper),
+.review-edit-form :deep(.el-textarea__inner) {
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.raw-textarea :deep(.el-textarea__inner) {
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.question-raw-field,
+.answer-raw-field,
+.question-raw-field :deep(.el-form-item__content),
+.answer-raw-field :deep(.el-form-item__content),
+.question-raw-field :deep(.el-textarea),
+.answer-raw-field :deep(.el-textarea) {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: auto;
 }
 
 .review-meta-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 14px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .review-meta-grid--wide {
   grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.review-meta-grid :deep(.el-form-item) {
+  min-width: 0;
 }
 
 .edit-preview-block {
@@ -356,6 +401,9 @@ onMounted(async () => {
   padding: 18px;
   border-radius: 18px;
   background: rgba(243, 246, 251, 0.72);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .edit-preview-head {
@@ -363,10 +411,21 @@ onMounted(async () => {
   justify-content: space-between;
   gap: 12px;
   align-items: flex-start;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
 }
 
 .edit-preview-head h4 {
+  flex: 0 0 auto;
   margin: 0;
+}
+
+.edit-preview-head .muted {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .preview-surface {
@@ -374,6 +433,52 @@ onMounted(async () => {
   border-radius: 16px;
   background: #fff;
   border: 1px solid var(--mm-border);
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.question-preview-surface,
+.answer-preview-surface {
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.question-preview-surface :deep(.markdown-content),
+.answer-preview-surface :deep(.markdown-content) {
+  width: max-content;
+  min-width: 100%;
+  max-width: none;
+  overflow-x: visible;
+}
+
+.question-preview-surface :deep(.markdown-content p),
+.question-preview-surface :deep(.markdown-content ul),
+.question-preview-surface :deep(.markdown-content ol),
+.question-preview-surface :deep(.markdown-content pre),
+.question-preview-surface :deep(.markdown-content table),
+.question-preview-surface :deep(.markdown-content .katex-display),
+.question-preview-surface :deep(.markdown-content .katex-display > .katex),
+.answer-preview-surface :deep(.markdown-content p),
+.answer-preview-surface :deep(.markdown-content ul),
+.answer-preview-surface :deep(.markdown-content ol),
+.answer-preview-surface :deep(.markdown-content pre),
+.answer-preview-surface :deep(.markdown-content table),
+.answer-preview-surface :deep(.markdown-content .katex-display),
+.answer-preview-surface :deep(.markdown-content .katex-display > .katex) {
+  max-width: none;
+  overflow-x: visible;
+}
+
+.edit-preview-block,
+.surface-note {
+  min-width: 0;
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+.surface-note {
+  overflow-wrap: anywhere;
 }
 
 .pdf-stack {
@@ -456,12 +561,6 @@ onMounted(async () => {
   width: 100%;
   padding-right: 12px;
   gap: 12px;
-}
-
-@media (max-width: 1680px) {
-  .review-content-grid {
-    grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr);
-  }
 }
 
 @media (max-width: 1280px) {

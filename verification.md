@@ -155,3 +155,50 @@
 - 修复：在通用 `MarkdownContent` 内约束 Markdown 根容器、段落、列表、代码块、表格、inline/display KaTeX 的最大宽度；长公式和表格在各自块内横向滚动，不再撑破调用页面的栅格。
 - 覆盖范围：该修复作用于所有复用 `MarkdownContent` 的页面，包括 `/review`、题目详情页、题库搜索结果和模板预览，不针对单个题号硬编码。
 - 验证：新增 `npm run check:markdown-layout`，先在旧样式下失败，修复后通过；前端构建 `npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。
+
+## 2026-04-25 10:20:00 +08:00 - 审核页双栏容器溢出加固验证
+
+- 执行者：Codex
+- 根因：上一轮只约束了 `MarkdownContent`，但 `/review/174` 的新截图显示浅蓝提示块、三列表单和 textarea 等审核页顶层容器本身也会在双栏布局中撑出左侧面板。
+- 修复：`ReviewPage.vue` 为审核页 grid、左右 panel、编辑表单、Element Plus 输入/选择/textarea wrapper、三列 meta grid、编辑块、预览块和提示块补齐 `min-width: 0`、`max-width: 100%`、局部 overflow 约束。
+- 修正：按用户反馈恢复原审核页双栏比例，单栏断点撤回到 `1280px`；仅为题干/答案两个原始文本 textarea 添加自身横向滚动，审核备注等普通 textarea 不受影响。
+- 验证：扩展 `npm run check:markdown-layout` 覆盖 `ReviewPage.vue` 容器约束与 `raw-textarea` 横滚约束，旧样式下失败，修复后通过；`npm run build` 通过。浏览器 DOM 访问 `http://localhost:5173/review/174` 可读取页面内容；截图接口返回 0 width 或 CDP 超时，未作为最终证据。
+
+## 2026-04-25 10:34:00 +08:00 - 答案整框横向滚动验证
+
+- 执行者：Codex
+- 根因：答案渲染区仍沿用通用 `MarkdownContent` 的段落/KaTeX 局部横滚策略，导致长公式只在公式所在行出现滚动条，而不是整个“当前答案渲染效果”框统一横向滚动。
+- 修复：`ReviewPage.vue` 为题干/答案原始文本表单项和题目/答案渲染预览框增加专用类；题目与答案渲染预览框接管横向滚动，内部 Markdown 段落、列表、代码块、表格、KaTeX display 公式展开为同一滚动面。
+- 验证：`npm run check:markdown-layout` 通过；`npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。
+
+## 2026-04-25 11:08:00 +08:00 - 多关键词搜索与分析默认值验证
+
+- 执行者：Codex
+- 搜索修复：`/api/search/questions` 新增 `keyword_match_mode=any|all`；题干关键词按空格、逗号、顿号、分号和换行拆分，`any` 使用 OR 匹配任意关键词，`all` 使用 AND 要求全部关键词同时出现在题干。
+- 前端修复：`/search` 题目搜索输入框支持多关键词，新增“任意关键词满足 / 全部关键词满足”切换，并把条件传给后端搜索接口。
+- 分析修复：题目分析服务不再根据题干/答案启发式填入知识点、解法或“高中数学综合”，也不再自动拼接“主要知识点/次级知识点/推荐解法”作为默认解释；缺少明确知识点或解释时拒绝落库，未分析题目保持空状态。
+- 详情页修复：`/questions/:id` 的分析结果按 `analysis_json` 中真实的主要知识点、次级知识点、推荐解法显示；没有分析记录时标签表单初始为空。
+- 验证：`uv run pytest tests/test_storage_and_slice.py -k "search_service_supports_any_and_all_keyword_modes or analysis_service"`，7 passed；`uv run pytest`，61 passed；前端 `npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。
+
+## 2026-04-25 11:22:00 +08:00 - 讲题对话数学格式 Prompt 验证
+
+- 执行者：Codex
+- 根因：讲题系统提示只要求教学化，没有明确约束数学表达式必须用 Markdown/LaTeX 数学分隔符输出，因此模型可能返回 `log_2(2^x+t)-x` 这类裸公式，前端 Markdown/KaTeX 不会自动渲染。
+- 修复：`chat_system_prompt.md` 增加数学输出格式约束：所有数学表达式必须写成可渲染 LaTeX，行内用 `$...$`，长推导用 `$$...$$`，并明确禁止裸公式示例。
+- 验证：`uv run pytest tests/test_storage_and_slice.py -k "chat_tutor_service_sends_image_parts_to_llm"`，1 passed；`uv run pytest tests/test_storage_and_slice.py -k "chat_tutor_service"`，6 passed；`uv run pytest`，61 passed。
+
+## 2026-04-25 11:35:00 +08:00 - LLM Markdown 可渲染 Prompt 全量检查
+
+- 执行者：Codex
+- 检查范围：`backend/app/services/prompts/` 下 5 个 prompt，以及 `LLMGateway`、`ChatTutorService` 中的 prompt 读取与兜底调用路径。
+- 结论：`slice_prompt.md`、`full_paper_boundary_prompt.md`、`full_answer_boundary_prompt.md` 是严格 JSON 接口契约，输出不会直接进入 `MarkdownContent`，因此必须继续禁止 Markdown、解释文字和代码块。
+- 修复：`analysis_prompt.md` 的 `explanation_md` 字段增加“必须能被前端 `MarkdownContent` 渲染”约束，并要求所有数学表达式使用 `$...$` 或 `$$...$$`，禁止裸公式、裸下标、裸上标。
+- 保留：`chat_system_prompt.md` 已具备同样的 Markdown/LaTeX 数学格式约束。
+- 验证：`uv run pytest tests/test_storage_and_slice.py -k "llm_prompts_pin_project_output_contracts or chat_tutor_service_sends_image_parts_to_llm"`，2 passed；`uv run pytest`，61 passed。
+
+## 2026-04-25 11:48:00 +08:00 - 题目详情页整块横向滚动验证
+
+- 执行者：Codex
+- 根因：此前整块横向滚动只加在 `/review/:id` 审核页的预览框；`/questions/:id` 详情页题干和答案仍直接使用通用 `MarkdownContent`，因此沿用段落、公式、表格局部横滚策略。
+- 修复：`QuestionDetailPage.vue` 为题干和答案各加 `detail-markdown-surface` 外层滚动容器，并让内部 Markdown、段落、列表、代码块、表格、KaTeX display 公式展开到同一个横向滚动面。
+- 验证：扩展 `npm run check:markdown-layout` 覆盖题目详情页整块滚动约束；`npm run check:markdown-layout` 通过；`npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。

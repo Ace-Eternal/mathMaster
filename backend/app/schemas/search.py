@@ -36,6 +36,7 @@ class PaperSearchParams(BaseModel):
 
 class QuestionSearchParams(BaseModel):
     keyword: str | None = None
+    keyword_match_mode: str = "any"
     question_type: str | None = None
     year: int | None = None
     region: str | None = None
