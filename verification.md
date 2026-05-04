@@ -202,3 +202,28 @@
 - 根因：此前整块横向滚动只加在 `/review/:id` 审核页的预览框；`/questions/:id` 详情页题干和答案仍直接使用通用 `MarkdownContent`，因此沿用段落、公式、表格局部横滚策略。
 - 修复：`QuestionDetailPage.vue` 为题干和答案各加 `detail-markdown-surface` 外层滚动容器，并让内部 Markdown、段落、列表、代码块、表格、KaTeX display 公式展开到同一个横向滚动面。
 - 验证：扩展 `npm run check:markdown-layout` 覆盖题目详情页整块滚动约束；`npm run check:markdown-layout` 通过；`npm run build` 通过。构建仍保留既有 Vite chunk size warning 与 npmrc 提示。
+## 2026-05-02 17:05:02 +08:00 - Codex 部署前可用性检查
+
+### 结论
+
+本地前后端可以启动，现有自动化测试与前端构建通过；项目已经具备本地用户试用/演示条件。若目标是部署到服务器并交给真实用户持续使用，当前仍存在生产化阻塞项，需要先补齐部署配置、环境样例与运行方式。
+
+### 已执行验证
+
+- `backend`: `uv run pytest`，结果 `61 passed in 5.14s`。
+- `frontend`: `npm run build`，结果通过；存在 Vite chunk size warning 与 npm 用户配置 warning。
+- `frontend`: `npm run check:markdown-layout`，结果通过。
+- `GET http://127.0.0.1:8000/healthz`，返回 `{"status":"ok"}`。
+- `GET http://127.0.0.1:8000/api/papers`，返回 4 份本地试卷，状态均为 `SLICED`。
+- `GET http://127.0.0.1:5173/`，返回 HTTP 200。
+
+### 部署前问题清单
+
+1. 生产部署配置仍是开发形态：`docker-compose.yml` 挂载源码目录，前端容器暴露 Vite dev server 5173，`frontend/Dockerfile` 使用 `npm run dev`，不适合作为服务器生产服务。
+2. README 要求复制 `.env.example`，但仓库当前没有 `.env.example`，新服务器无法按文档稳定初始化环境。
+3. 前端默认 API 地址硬编码到 `127.0.0.1:8000`，生产环境必须显式注入 `VITE_API_BASE_URL`，否则用户浏览器会请求自己的本机。
+4. 当前 Docker Compose 没有持久化挂载 `data/`，且 README 示例使用 Windows 绝对路径，直接搬到 Linux 服务器会路径失效或数据不可持久。
+5. `backend/alembic.ini` 保留示例 MySQL 地址与密码占位；虽然运行时会由 `app.core.config` 覆盖，但部署交接上容易误用。
+6. 生产依赖版本未完全固定：前端 Dockerfile 未复制 `package-lock.json` 且使用 `npm install`，后端 Dockerfile 未使用 `uv.lock`，服务器构建可重复性不足。
+7. 前端构建主 JS chunk 约 1.79 MB，当前不阻塞上线，但会影响首屏加载，应在部署优化阶段做代码拆分。
+8. 登录页明确说明无需登录，当前系统更适合内网或受控环境试用；若面向公网真实用户，需要先明确访问边界与运维策略。
