@@ -22,6 +22,9 @@ const activeGenerationId = ref<string | null>(null)
 const activeAssistantMessage = ref<any>(null)
 const selectedModel = ref<string | null>(null)
 const defaultChatModel = ref<string | null>(null)
+const analysisTasks = ref<any[]>([])
+const analysisSubmitting = ref(false)
+let analysisRefreshTimer: ReturnType<typeof window.setInterval> | null = null
 const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'
 const STOP_NOTICE = '\n\n> 已停止生成'
 
@@ -61,6 +64,16 @@ const composerButtonDisabled = computed(() => {
 })
 const composerButtonLabel = computed(() => (isStreaming.value ? '停止生成' : '发送消息'))
 const currentModelLabel = computed(() => selectedModel.value || defaultChatModel.value || '默认模型')
+const activeAnalysisTask = computed(() =>
+  analysisTasks.value.find((task) => ['QUEUED', 'RUNNING', 'BLOCKED'].includes(task.status))
+)
+const failedAnalysisTask = computed(() => analysisTasks.value.find((task) => task.status === 'FAILED'))
+const analysisButtonLabel = computed(() => {
+  if (activeAnalysisTask.value?.status === 'RUNNING') return '分析中'
+  if (activeAnalysisTask.value?.status === 'QUEUED') return '分析已入队'
+  if (activeAnalysisTask.value?.status === 'BLOCKED') return '等待分析'
+  return '运行题目分析'
+})
 
 const load = async () => {
   detail.value = (await api.get(`/questions/${props.id}`)).data
@@ -113,6 +126,31 @@ const loadChatModels = async () => {
   }
 }
 
+const loadAnalysisTasks = async () => {
+  const { data } = await api.get('/tasks', {
+    params: {
+      question_id: Number(props.id),
+      task_type: 'QUESTION_ANALYSIS',
+    },
+  })
+  analysisTasks.value = data || []
+}
+
+const stopAnalysisRefresh = () => {
+  if (analysisRefreshTimer) {
+    window.clearInterval(analysisRefreshTimer)
+    analysisRefreshTimer = null
+  }
+}
+
+const startAnalysisRefresh = () => {
+  if (analysisRefreshTimer) return
+  analysisRefreshTimer = window.setInterval(async () => {
+    await Promise.all([loadAnalysisTasks(), load()])
+    if (!activeAnalysisTask.value) stopAnalysisRefresh()
+  }, 2500)
+}
+
 const selectSession = async (sessionId: number) => {
   if (streamState.value !== 'idle') return
   await loadSession(sessionId)
@@ -126,8 +164,20 @@ const createNewSession = () => {
 }
 
 const runAnalysis = async () => {
-  await api.post(`/analysis/questions/${props.id}`)
-  await load()
+  analysisSubmitting.value = true
+  try {
+    const { data } = await api.post(`/analysis/questions/${props.id}`)
+    if (data.pipeline_task) {
+      analysisTasks.value = [
+        data.pipeline_task,
+        ...analysisTasks.value.filter((task) => task.id !== data.pipeline_task.id),
+      ]
+    }
+    ElMessage.success(data.pipeline_task?.status === 'RUNNING' ? '题目分析正在运行。' : '题目分析已加入队列。')
+    startAnalysisRefresh()
+  } finally {
+    analysisSubmitting.value = false
+  }
 }
 
 const scrollChatToBottom = async () => {
@@ -377,14 +427,16 @@ const saveTags = async () => {
 }
 
 onMounted(async () => {
-  await Promise.all([load(), loadDictionary(), loadChatModels(), loadChatSessions()])
+  await Promise.all([load(), loadDictionary(), loadChatModels(), loadChatSessions(), loadAnalysisTasks()])
   if (!session.value && !chatSessions.value.length) {
     createNewSession()
   }
+  if (activeAnalysisTask.value) startAnalysisRefresh()
 })
 
 onBeforeUnmount(() => {
   streamController.value?.abort()
+  stopAnalysisRefresh()
 })
 </script>
 
@@ -397,7 +449,14 @@ onBeforeUnmount(() => {
           审核状态：{{ detail.review_status }}。{{ detail.review_note || '当前题目暂无额外审核备注。' }}
         </div>
       </div>
-      <el-button type="primary" @click="runAnalysis">运行题目分析</el-button>
+      <el-button
+        type="primary"
+        :loading="analysisSubmitting || activeAnalysisTask?.status === 'RUNNING'"
+        :disabled="Boolean(activeAnalysisTask)"
+        @click="runAnalysis"
+      >
+        {{ analysisButtonLabel }}
+      </el-button>
     </div>
 
     <div class="grid cols-2">
@@ -463,6 +522,12 @@ onBeforeUnmount(() => {
           <MarkdownContent :content="detail.analysis.explanation_md" />
         </div>
         <div v-else class="muted">尚未生成分析结果。</div>
+        <div v-if="activeAnalysisTask" class="muted" style="margin-top: 12px">
+          分析任务状态：{{ activeAnalysisTask.status }}{{ activeAnalysisTask.queue_position ? `，队列第 ${activeAnalysisTask.queue_position} 位` : '' }}
+        </div>
+        <div v-else-if="failedAnalysisTask" class="error-line" style="margin-top: 12px">
+          {{ failedAnalysisTask.error_message || '题目分析失败，请重新运行。' }}
+        </div>
 
         <div class="tag-editor">
           <h3>人工维护标签</h3>

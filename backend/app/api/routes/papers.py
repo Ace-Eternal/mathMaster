@@ -41,12 +41,18 @@ def build_task_response(task, *, queue_position: int | None = None) -> PipelineT
     return PipelineTaskResponse(
         id=task.id,
         paper_id=task.paper_id,
+        question_id=task.question_id,
+        task_type=task.task_type,
         status=task.status,
         source=task.source,
+        depends_on_task_id=task.depends_on_task_id,
         queued_at=task.queued_at,
         started_at=task.started_at,
         finished_at=task.finished_at,
         error_message=task.error_message,
+        blocked_reason=task.blocked_reason,
+        attempt_count=task.attempt_count,
+        max_attempts=task.max_attempts,
         queue_position=queue_position,
         created_at=task.created_at,
         updated_at=task.updated_at,
@@ -169,7 +175,7 @@ def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
     responses = []
     for paper_id in payload.paper_ids:
         paper = service.get_paper(paper_id)
-        task = pipeline_task_queue.enqueue(db, paper_id=paper.id, source="BATCH")
+        task, _ = pipeline_task_queue.enqueue_pipeline(db, paper_id=paper.id, source="BATCH")
         db.commit()
         db.refresh(task)
         pipeline_task_queue.notify()
@@ -231,7 +237,7 @@ def unbind_answer(paper_id: int, db: Session = Depends(get_db)):
 @router.post("/{paper_id}/pipeline/run-all", response_model=PipelineRunResponse)
 def run_pipeline(paper_id: int, db: Session = Depends(get_db)):
     paper = get_pipeline_service(db).get_paper(paper_id)
-    task = pipeline_task_queue.enqueue(db, paper_id=paper.id, source="SINGLE")
+    task, _ = pipeline_task_queue.enqueue_pipeline(db, paper_id=paper.id, source="SINGLE")
     db.commit()
     db.refresh(task)
     pipeline_task_queue.notify()

@@ -227,3 +227,10 @@
 6. 生产依赖版本未完全固定：前端 Dockerfile 未复制 `package-lock.json` 且使用 `npm install`，后端 Dockerfile 未使用 `uv.lock`，服务器构建可重复性不足。
 7. 前端构建主 JS chunk 约 1.79 MB，当前不阻塞上线，但会影响首屏加载，应在部署优化阶段做代码拆分。
 8. 登录页明确说明无需登录，当前系统更适合内网或受控环境试用；若面向公网真实用户，需要先明确访问边界与运维策略。
+## 2026-05-04 22:25:00 +08:00 - 阶段队列与单题分析队列验证
+
+- 执行者：Codex。
+- 实现：`pipeline_task` 扩展为统一阶段任务，支持 `MINEU_CONVERT`、`SLICE_MATCH`、`QUESTION_ANALYSIS`；后端按任务类型启动 MineU 2 并发、切题匹配 1 并发、分析 2 并发 worker。
+- 行为：单卷/批量运行先创建 MineU 阶段任务，再创建依赖 MineU 的切题匹配任务；单题分析接口改为立即入队返回，前端单题页轮询任务状态。
+- 后端验证：`cd backend; uv run pytest` 通过，`61 passed in 3.79s`。
+- 前端验证：`cd frontend; npm run build` 通过；保留既有 npm 配置提示和 Vite 大 chunk 警告。

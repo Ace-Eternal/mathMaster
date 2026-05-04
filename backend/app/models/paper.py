@@ -25,19 +25,29 @@ class PipelineTask(TimestampMixin, Base):
     __tablename__ = "pipeline_task"
     __table_args__ = (
         Index("ix_pipeline_task_status_queued_at", "status", "queued_at"),
+        Index("ix_pipeline_task_type_status_queued_at", "task_type", "status", "queued_at"),
         Index("ix_pipeline_task_paper_status", "paper_id", "status"),
+        Index("ix_pipeline_task_question_status", "question_id", "status"),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    paper_id: Mapped[int] = mapped_column(ForeignKey("paper.id"), nullable=False)
+    paper_id: Mapped[int | None] = mapped_column(ForeignKey("paper.id"))
+    question_id: Mapped[int | None] = mapped_column(ForeignKey("question.id"))
+    task_type: Mapped[str] = mapped_column(String(64), default="MINEU_CONVERT", nullable=False)
     status: Mapped[str] = mapped_column(String(32), default="QUEUED", nullable=False)
     source: Mapped[str] = mapped_column(String(32), default="SINGLE", nullable=False)
+    depends_on_task_id: Mapped[int | None] = mapped_column(ForeignKey("pipeline_task.id"))
     queued_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     error_message: Mapped[str | None] = mapped_column(Text)
+    blocked_reason: Mapped[str | None] = mapped_column(Text)
+    attempt_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
-    paper: Mapped["Paper"] = relationship()
+    paper: Mapped["Paper | None"] = relationship(foreign_keys=[paper_id])
+    question: Mapped["Question | None"] = relationship(foreign_keys=[question_id])
+    depends_on_task: Mapped["PipelineTask | None"] = relationship(remote_side=[id])
 
 
 class Paper(TimestampMixin, Base):

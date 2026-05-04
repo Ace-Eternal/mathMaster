@@ -3,6 +3,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from app.schemas.common import ORMModel, TimestampedResponse
+from app.schemas.paper import PipelineTaskResponse
 
 
 class QuestionAnswerResponse(TimestampedResponse):
@@ -105,10 +106,11 @@ class ReviewQueueItem(ORMModel):
 
 class AnalysisRunResponse(BaseModel):
     question_id: int
-    analysis_id: int
-    knowledges: list[str]
-    methods: list[str]
-    needs_review: bool
+    analysis_id: int | None = None
+    knowledges: list[str] = Field(default_factory=list)
+    methods: list[str] = Field(default_factory=list)
+    needs_review: bool = False
+    pipeline_task: PipelineTaskResponse | None = None
 
 
 class QuestionTagUpdateRequest(BaseModel):

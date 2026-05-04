@@ -24,6 +24,7 @@ from app.services.mineu.service import MineuService
 from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key
 from app.services import pipeline_queue as pipeline_queue_module
 from app.services.pipeline_queue import PipelineTaskQueue
+from app.services.pipeline_queue import TASK_TYPE_MINEU_CONVERT, TASK_TYPE_SLICE_MATCH
 from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.review import ReviewService
 from app.services.search import SearchService
@@ -129,9 +130,11 @@ def test_run_pipeline_api_enqueues_and_returns_immediately(tmp_path, monkeypatch
     assert payload["paper_id"] == paper_id
     assert payload["pipeline_task"]["status"] == "QUEUED"
     with session_factory() as db:
-        tasks = db.execute(select(PipelineTask)).scalars().all()
-        assert len(tasks) == 1
-        assert tasks[0].paper_id == paper_id
+        tasks = list(db.execute(select(PipelineTask).order_by(PipelineTask.id.asc())).scalars())
+        assert len(tasks) == 2
+        assert [task.paper_id for task in tasks] == [paper_id, paper_id]
+        assert [task.task_type for task in tasks] == [TASK_TYPE_MINEU_CONVERT, TASK_TYPE_SLICE_MATCH]
+        assert [task.status for task in tasks] == ["QUEUED", "BLOCKED"]
 
 
 def test_pipeline_task_queue_enqueue_returns_existing_active_task(tmp_path):
@@ -146,7 +149,7 @@ def test_pipeline_task_queue_enqueue_returns_existing_active_task(tmp_path):
 
         task_count = db.execute(select(PipelineTask)).scalars().all()
         assert second_task.id == first_task.id
-        assert len(task_count) == 1
+        assert len(task_count) == 2
         assert second_task.source == "SINGLE"
 
 
@@ -171,8 +174,14 @@ def test_batch_run_api_enqueues_in_order_without_duplicate_tasks(tmp_path, monke
     assert payload[0]["pipeline_task"]["id"] == payload[1]["pipeline_task"]["id"]
     with session_factory() as db:
         tasks = list(db.execute(select(PipelineTask).order_by(PipelineTask.id.asc())).scalars())
-        assert [task.paper_id for task in tasks] == [paper_one_id, paper_two_id]
-        assert [task.source for task in tasks] == ["BATCH", "BATCH"]
+        assert [task.paper_id for task in tasks] == [paper_one_id, paper_one_id, paper_two_id, paper_two_id]
+        assert [task.task_type for task in tasks] == [
+            TASK_TYPE_MINEU_CONVERT,
+            TASK_TYPE_SLICE_MATCH,
+            TASK_TYPE_MINEU_CONVERT,
+            TASK_TYPE_SLICE_MATCH,
+        ]
+        assert [task.source for task in tasks] == ["BATCH", "BATCH", "BATCH", "BATCH"]
 
 
 def test_pipeline_tasks_api_returns_queue_positions(tmp_path, monkeypatch):
@@ -302,18 +311,18 @@ def test_pipeline_task_queue_claims_tasks_in_queued_order_and_marks_success(tmp_
         task_one_id = task_one.id
         task_two_id = task_two.id
 
-    assert queue._claim_next_task() == (task_one_id, paper_one_id)
-    assert queue._claim_next_task() == (task_two_id, paper_two_id)
+    assert queue._claim_next_task() == (task_one_id, TASK_TYPE_MINEU_CONVERT, paper_one_id, None)
+    assert queue._claim_next_task() == (task_two_id, TASK_TYPE_MINEU_CONVERT, paper_two_id, None)
 
     queue._mark_task_success(task_one_id)
     queue._mark_task_success(task_two_id)
 
     with session_factory() as db:
-        statuses = [
-            task.status
-            for task in db.execute(select(PipelineTask).order_by(PipelineTask.id.asc())).scalars()
-        ]
-        assert statuses == ["SUCCESS", "SUCCESS"]
+        statuses = {
+            task.id: task.status
+            for task in db.execute(select(PipelineTask).where(PipelineTask.id.in_([task_one_id, task_two_id]))).scalars()
+        }
+        assert statuses == {task_one_id: "SUCCESS", task_two_id: "SUCCESS"}
 
 
 def test_pipeline_task_queue_marks_failed_with_error_message(tmp_path, monkeypatch):
@@ -328,7 +337,7 @@ def test_pipeline_task_queue_marks_failed_with_error_message(tmp_path, monkeypat
         paper_id = paper.id
         task_id = task.id
 
-    assert queue._claim_next_task() == (task_id, paper_id)
+    assert queue._claim_next_task() == (task_id, TASK_TYPE_MINEU_CONVERT, paper_id, None)
     queue._mark_task_failed(task_id, "LLM streaming response empty")
 
     with session_factory() as db:

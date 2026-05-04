@@ -17,13 +17,17 @@ type ImportItem = {
 
 type PipelineTaskItem = {
   id: number
-  paper_id: number
-  status: 'QUEUED' | 'RUNNING' | 'SUCCESS' | 'FAILED' | string
+  paper_id: number | null
+  question_id?: number | null
+  task_type?: 'MINEU_CONVERT' | 'SLICE_MATCH' | 'QUESTION_ANALYSIS' | string
+  status: 'QUEUED' | 'RUNNING' | 'BLOCKED' | 'SUCCESS' | 'FAILED' | string
   source: 'SINGLE' | 'BATCH' | string
+  depends_on_task_id?: number | null
   queued_at: string
   started_at: string | null
   finished_at: string | null
   error_message: string | null
+  blocked_reason?: string | null
   queue_position: number | null
   created_at: string
   updated_at: string
@@ -81,7 +85,7 @@ const loadPapers = async (options: { silent?: boolean } = {}) => {
       api.get('/papers/pipeline-tasks')
     ])
     papers.value = paperResponse.data
-    pipelineTasks.value = taskResponse.data
+    pipelineTasks.value = taskResponse.data.filter((task: PipelineTaskItem) => task.paper_id)
   } finally {
     refreshing.value = false
     if (!options.silent) loading.value = false
@@ -99,21 +103,25 @@ const unmarkPaperRunning = (paperId: number) => {
 }
 
 const taskByPaperId = computed(() => {
-  const statusPriority: Record<string, number> = { RUNNING: 0, QUEUED: 1, FAILED: 2 }
+  const statusPriority: Record<string, number> = { RUNNING: 0, QUEUED: 1, BLOCKED: 2, FAILED: 3 }
   const items = [...pipelineTasks.value].sort((a, b) => {
     const statusDelta = (statusPriority[a.status] ?? 9) - (statusPriority[b.status] ?? 9)
     if (statusDelta !== 0) return statusDelta
+    const typePriority: Record<string, number> = { SLICE_MATCH: 0, MINEU_CONVERT: 1, QUESTION_ANALYSIS: 2 }
+    const typeDelta = (typePriority[a.task_type || ''] ?? 9) - (typePriority[b.task_type || ''] ?? 9)
+    if (typeDelta !== 0) return typeDelta
     return new Date(b.updated_at || 0).getTime() - new Date(a.updated_at || 0).getTime()
   })
   return new Map(items.map((task) => [task.paper_id, task]))
 })
 
-const isActivePipelineTask = (task?: PipelineTaskItem) => task?.status === 'QUEUED' || task?.status === 'RUNNING'
+const isActivePipelineTask = (task?: PipelineTaskItem) => task?.status === 'QUEUED' || task?.status === 'RUNNING' || task?.status === 'BLOCKED'
 
 const activePipelinePaperIds = computed(() => {
   const activeIds = pipelineTasks.value
     .filter((task) => isActivePipelineTask(task))
     .map((task) => task.paper_id)
+    .filter(Boolean) as number[]
   return new Set([...runningPaperIds.value, ...activeIds])
 })
 
@@ -424,6 +432,7 @@ const deletePendingTask = async (paperId: number, title: string) => {
 const applyPipelineTaskState = (paperTask: TaskListItem, task?: PipelineTaskItem): TaskListItem => {
   if (!task) return paperTask
   if (task.status === 'QUEUED') {
+    const notePrefix = task.task_type === 'SLICE_MATCH' ? '切题匹配' : task.task_type === 'MINEU_CONVERT' ? 'MineU 转换' : '任务'
     return {
       ...paperTask,
       stage: '排队中',
@@ -431,21 +440,34 @@ const applyPipelineTaskState = (paperTask: TaskListItem, task?: PipelineTaskItem
       updatedAt: task.updated_at || paperTask.updatedAt,
       errorSummary: null,
       note: task.queue_position
-        ? `本地单 worker 队列第 ${task.queue_position} 位，等待运行。`
-        : '已进入本地单 worker 队列，等待运行。',
+        ? `${notePrefix}已入队，第 ${task.queue_position} 位，等待运行。`
+        : `${notePrefix}已入队，等待运行。`,
       queuePosition: task.queue_position,
       queueStatus: task.status
     }
   }
   if (task.status === 'RUNNING') {
     const runningStages = ['MineU解析中', '边界识别中', '切题匹配中']
+    const stage = task.task_type === 'SLICE_MATCH' ? '边界识别中' : 'MineU解析中'
     return {
       ...paperTask,
-      stage: runningStages.includes(paperTask.stage) ? paperTask.stage : 'MineU解析中',
+      stage: runningStages.includes(paperTask.stage) ? paperTask.stage : stage,
       progress: Math.max(paperTask.progress, 20),
       updatedAt: task.updated_at || paperTask.updatedAt,
       errorSummary: null,
-      note: paperTask.note || '本地队列正在执行该试卷。',
+      note: paperTask.note || (task.task_type === 'SLICE_MATCH' ? '正在执行边界识别、切题和答案匹配。' : '正在执行 MineU 转换。'),
+      queuePosition: null,
+      queueStatus: task.status
+    }
+  }
+  if (task.status === 'BLOCKED') {
+    return {
+      ...paperTask,
+      stage: '排队中',
+      progress: Math.max(paperTask.progress, 12),
+      updatedAt: task.updated_at || paperTask.updatedAt,
+      errorSummary: null,
+      note: task.blocked_reason || '等待前置阶段完成。',
       queuePosition: null,
       queueStatus: task.status
     }

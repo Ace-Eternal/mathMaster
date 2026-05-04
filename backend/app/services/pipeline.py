@@ -28,7 +28,6 @@ from app.models import (
     QuestionMethod,
     ReviewRecord,
 )
-from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.review_state import (
@@ -1387,16 +1386,44 @@ class PaperPipelineService:
         return self.get_paper(paper_id)
 
     def run_pipeline(self, paper_id: int) -> Paper:
+        self.run_mineu_conversion(paper_id)
+        self.run_slice_match(paper_id)
+        return self.get_paper(paper_id)
+
+    def run_mineu_conversion(self, paper_id: int) -> Paper:
         paper = self.get_paper(paper_id)
         if paper.is_deleted:
             raise HTTPException(status_code=400, detail="Deleted paper cannot run pipeline")
 
         try:
-            paper_job = self._run_conversion_job(paper, "PAPER", paper.paper_pdf_path)
-            answer_job = None
+            self._run_conversion_job(paper, "PAPER", paper.paper_pdf_path)
             if paper.answer_sheet and paper.answer_sheet.has_answer and paper.answer_sheet.answer_pdf_path:
-                answer_job = self._run_conversion_job(paper, "ANSWER", paper.answer_sheet.answer_pdf_path)
+                self._run_conversion_job(paper, "ANSWER", paper.answer_sheet.answer_pdf_path)
+            return self.get_paper(paper_id)
+        except HTTPException:
+            raise
+        except SQLAlchemyError as exc:
+            self.db.rollback()
+            self._mark_pipeline_failure(paper, stage="SYSTEM", detail=f"数据库写入失败: {exc}")
+            raise HTTPException(status_code=500, detail=f"Pipeline database failure: {exc}") from exc
+        except Exception as exc:  # noqa: BLE001
+            self._mark_pipeline_failure(paper, stage="MINEU", detail=str(exc))
+            raise HTTPException(status_code=502, detail=f"MineU conversion failed: {exc}") from exc
 
+    def run_slice_match(self, paper_id: int) -> list[int]:
+        paper = self.get_paper(paper_id)
+        if paper.is_deleted:
+            raise HTTPException(status_code=400, detail="Deleted paper cannot run pipeline")
+
+        try:
+            paper_job = self._get_existing_job(paper.id, job_type="PAPER")
+            if paper_job is None or paper_job.status != "SUCCESS" or not self._conversion_assets_complete(paper=paper, job=paper_job):
+                raise HTTPException(status_code=409, detail="试卷 MineU 转换尚未完成")
+            answer_job = None
+            if paper.answer_sheet and paper.answer_sheet.has_answer:
+                answer_job = self._get_existing_job(paper.id, job_type="ANSWER")
+                if answer_job is None or answer_job.status != "SUCCESS" or not self._conversion_assets_complete(paper=paper, job=answer_job):
+                    raise HTTPException(status_code=409, detail="答案 MineU 转换尚未完成")
             boundary_job = self._get_or_create_job(paper, job_type="BOUNDARY", provider="LLM")
             boundary_job.status = "RUNNING"
             boundary_job.error_message = None
@@ -1447,13 +1474,13 @@ class PaperPipelineService:
             paper.status = "MATCH_RUNNING"
             self.db.commit()
 
-            match_warning = self._replace_questions(paper, question_candidates, answer_candidates)
+            match_warning, created_question_ids = self._replace_questions(paper, question_candidates, answer_candidates)
             combined_warning = " | ".join(item for item in [boundary_job.error_message, match_warning] if item)
             self._archive_source_files(paper)
             match_job.status = "SUCCESS"
             match_job.error_message = combined_warning or None
             self.db.commit()
-            return self.get_paper(paper_id)
+            return created_question_ids
         except HTTPException as exc:
             stage = "BOUNDARY" if paper.status == "BOUNDARY_RUNNING" else "MATCH"
             self._mark_pipeline_failure(paper, stage=stage, detail=str(exc.detail))
@@ -1680,10 +1707,9 @@ class PaperPipelineService:
         paper: Paper,
         question_candidates: list[QuestionSliceDraft],
         answer_candidates: list[AnswerSliceDraft],
-    ) -> str | None:
+    ) -> tuple[str | None, list[int]]:
         pending_found = False
         fallback_notices: list[str] = []
-        analysis_warnings: list[str] = []
         for existing_question in paper.questions:
             self.db.query(QuestionMethod).filter(QuestionMethod.question_id == existing_question.id).delete()
             self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id == existing_question.id).delete()
@@ -1755,16 +1781,9 @@ class PaperPipelineService:
 
         self.db.commit()
 
-        analysis_service = KnowledgeAnalysisService(self.db, LLMGateway())
-        for question_id in created_question_ids:
-            try:
-                analysis_service.analyze_question(question_id)
-            except Exception as exc:  # noqa: BLE001
-                analysis_warnings.append(f"question_id={question_id}: {exc}")
-
         paper.status = "REVIEW_PENDING" if pending_found else "SLICED"
-        unique_notices = list(dict.fromkeys([*fallback_notices, *analysis_warnings]))
-        return " | ".join(unique_notices) if unique_notices else None
+        unique_notices = list(dict.fromkeys(fallback_notices))
+        return " | ".join(unique_notices) if unique_notices else None, created_question_ids
 
     def _build_review_note(self, candidate: QuestionSliceDraft, refined: dict[str, Any]) -> str | None:
         notes: list[str] = []

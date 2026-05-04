@@ -51,6 +51,21 @@ def ensure_sqlite_columns() -> None:
         if "selected_model" not in chat_session_columns:
             statements.append("ALTER TABLE chat_session ADD COLUMN selected_model VARCHAR(128)")
 
+    if "pipeline_task" in table_names:
+        pipeline_task_columns = {column["name"] for column in inspector.get_columns("pipeline_task")}
+        if "question_id" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN question_id INTEGER")
+        if "task_type" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN task_type VARCHAR(64) NOT NULL DEFAULT 'MINEU_CONVERT'")
+        if "depends_on_task_id" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN depends_on_task_id INTEGER")
+        if "blocked_reason" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN blocked_reason TEXT")
+        if "attempt_count" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
+        if "max_attempts" not in pipeline_task_columns:
+            statements.append("ALTER TABLE pipeline_task ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1")
+
     # 旧版数学单科设计遗留 subject 字段，当前模型已统一移除。
     for table_name in ["knowledge_point", "solution_method"]:
         if table_name in table_names:

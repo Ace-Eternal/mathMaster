@@ -81,13 +81,19 @@ class PaperResponse(TimestampedResponse):
 
 class PipelineTaskResponse(TimestampedResponse):
     id: int
-    paper_id: int
+    paper_id: int | None = None
+    question_id: int | None = None
+    task_type: str = "MINEU_CONVERT"
     status: str
     source: str
+    depends_on_task_id: int | None = None
     queued_at: datetime
     started_at: datetime | None = None
     finished_at: datetime | None = None
     error_message: str | None = None
+    blocked_reason: str | None = None
+    attempt_count: int = 0
+    max_attempts: int = 1
     queue_position: int | None = None
 
 
