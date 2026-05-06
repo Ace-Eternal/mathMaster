@@ -234,3 +234,33 @@
 - 行为：单卷/批量运行先创建 MineU 阶段任务，再创建依赖 MineU 的切题匹配任务；单题分析接口改为立即入队返回，前端单题页轮询任务状态。
 - 后端验证：`cd backend; uv run pytest` 通过，`61 passed in 3.79s`。
 - 前端验证：`cd frontend; npm run build` 通过；保留既有 npm 配置提示和 Vite 大 chunk 警告。
+
+## 2026-05-06 17:xx:xx +08:00 - 多用户、权限审计与随机刷题验证
+
+- 执行者：Codex。
+- 实现：新增本地账号登录、默认超级管理员种子、RBAC 权限检查口子、审计日志、用户管理页、用户级随机刷题状态与收藏、随机刷题页、工作台刷题概览；题目详情页答案默认隐藏并可手动显示。
+- 后端验证：`cd backend; uv run --python 3.12.12 pytest` 通过，`63 passed`。本机 `uv` 无法下载项目声明的 Python 3.12.13 Windows 包，验证使用相邻托管版本 Python 3.12.12。
+- 前端验证：首次 `npm run build` 因未安装依赖缺失 `vue-tsc` 失败；执行 `npm install` 后，`npm run build` 通过。构建保留 Vite 大 chunk 警告。
+- 补充说明：`npm install` 报告 3 个依赖漏洞提示，未自动执行 `npm audit fix`，避免引入无关依赖版本变更。
+
+## 2026-05-06 18:20:00 +08:00 - 个人中心与超级管理员用户管理验证
+
+- 执行者：Codex。
+- 实现：新增 `/api/profile` 个人中心接口与前端 `/profile` 页面；用户管理接口统一要求 `SUPER_ADMIN` 角色；新增用户直接权限表和角色模板；用户管理页支持角色和直接权限矩阵；导航和路由守卫隐藏/拦截普通用户访问 `/users`；随机刷题按钮替换为本地骰子图标。
+- 后端验证：`cd backend; uv run --python 3.12.12 pytest` 通过，`66 passed`。
+- 前端验证：`cd frontend; npm run build` 通过；保留既有 Vite 大 chunk 警告。
+
+## 2026-05-06 20:18:00 +08:00 - 服务器打包部署验证
+
+- 执行者：Codex。
+- 本地打包：`cd frontend; npm run build` 通过；`cd backend; uv run --python 3.12.12 pytest` 通过，`66 passed`。
+- 部署方式：沿用服务器现有 `/opt/mathmaster` 结构与 `mathmaster-backend.service`，前端静态文件部署到 `/var/www/mathmaster`，Nginx 继续监听 `8080` 并反代 `/api` 到 `127.0.0.1:8000`。
+- 部署修复：新增生产 Docker 配置文件；修复 MySQL 密码含 `@` 时 SQLAlchemy URL 解析问题；修复 Alembic URL 中 `%` 插值问题。
+- 远端验证：MySQL 迁移执行到 `20260506_0006`；`systemctl status mathmaster-backend` 为 active；`http://106.54.35.68:8080/` 返回 200；`/healthz` 返回 `ok`；管理员登录接口验证通过。
+
+## 2026-05-06 20:32:00 +08:00 - 答案显隐与随机刷题状态图标验证
+
+- 执行者：Codex。
+- 实现：答案显隐统一为眼睛/眼睛斜杠图标按钮；随机刷题状态改为下拉框，状态项使用白/黄/绿实心圆点加文字；收藏改为星标按钮，未收藏为空心星，已收藏为黄色实心星；个人中心刷题列表同步使用状态圆点和星标。
+- 前端验证：`cd frontend; npm run build` 通过；构建产物不再包含 `127.0.0.1:8000`。
+- 远端验证：已部署到 `http://106.54.35.68:8080/`，Nginx 配置检查通过，首页返回 200。

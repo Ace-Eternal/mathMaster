@@ -40,6 +40,7 @@ const batchRunning = ref(false)
 const refreshing = ref(false)
 const papers = ref<any[]>([])
 const pipelineTasks = ref<PipelineTaskItem[]>([])
+const practiceSummary = ref<any | null>(null)
 const latestImportItems = ref<ImportItem[]>([])
 const latestImportSummary = ref<any | null>(null)
 const transientTasks = ref<TaskListItem[]>([])
@@ -80,12 +81,14 @@ const loadPapers = async (options: { silent?: boolean } = {}) => {
   refreshing.value = true
   if (!options.silent) loading.value = true
   try {
-    const [paperResponse, taskResponse] = await Promise.all([
+    const [paperResponse, taskResponse, practiceResponse] = await Promise.all([
       api.get('/papers'),
-      api.get('/papers/pipeline-tasks')
+      api.get('/papers/pipeline-tasks'),
+      api.get('/practice/summary')
     ])
     papers.value = paperResponse.data
     pipelineTasks.value = taskResponse.data.filter((task: PipelineTaskItem) => task.paper_id)
+    practiceSummary.value = practiceResponse.data
   } finally {
     refreshing.value = false
     if (!options.silent) loading.value = false
@@ -591,6 +594,50 @@ onBeforeUnmount(stopAutoRefresh)
             <RouterLink to="/paper-management"><el-button>高级试卷管理</el-button></RouterLink>
           </div>
         </div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="section-head">
+        <div>
+          <div class="section-title">随机刷题</div>
+          <div class="muted">同步当前登录用户的解决中、已解决和收藏题目。</div>
+        </div>
+        <RouterLink to="/practice"><el-button type="primary">进入随机刷题</el-button></RouterLink>
+      </div>
+      <div class="grid cols-2">
+        <div class="surface-note">
+          <div class="resume-title">刷题概览</div>
+          <div class="focus-inline-list">
+            <div class="focus-inline-item"><strong>解决中</strong><span>{{ practiceSummary?.in_progress_count || 0 }} 道</span></div>
+            <div class="focus-inline-item"><strong>已解决</strong><span>{{ practiceSummary?.solved_count || 0 }} 道</span></div>
+            <div class="focus-inline-item"><strong>收藏</strong><span>{{ practiceSummary?.favorite_count || 0 }} 道</span></div>
+          </div>
+        </div>
+        <div class="surface-note">
+          <div class="resume-title">最近解决中</div>
+          <template v-if="practiceSummary?.recent_in_progress?.length">
+            <div v-for="item in practiceSummary.recent_in_progress" :key="`practice-${item.question_id}`" class="focus-item">
+              <div class="focus-item__title">题目 {{ item.question_no }}</div>
+              <div class="muted">{{ item.paper_title }}</div>
+              <RouterLink :to="`/questions/${item.question_id}`" class="resume-link">查看题目</RouterLink>
+            </div>
+          </template>
+          <div v-else class="muted">当前没有解决中的题目。</div>
+        </div>
+      </div>
+      <div class="surface-note" style="margin-top: 18px">
+        <div class="resume-title">最近收藏</div>
+        <template v-if="practiceSummary?.recent_favorites?.length">
+          <div class="focus-inline-list">
+            <div v-for="item in practiceSummary.recent_favorites" :key="`favorite-${item.question_id}`" class="focus-inline-item">
+              <strong>题目 {{ item.question_no }}</strong>
+              <span class="muted">{{ item.paper_title }}</span>
+              <RouterLink :to="`/questions/${item.question_id}`" class="resume-link">查看</RouterLink>
+            </div>
+          </div>
+        </template>
+        <div v-else class="muted">当前还没有收藏题目。</div>
       </div>
     </section>
 

@@ -63,6 +63,11 @@ class Settings(BaseSettings):
     llm_use_mock: bool = True
 
     local_workspace_root: str = str(WORKSPACE_ROOT)
+    auth_secret_key: str = "mathmaster-local-dev-secret"
+    auth_token_expire_hours: int = 168
+    bootstrap_admin_username: str = "admin"
+    bootstrap_admin_password: str = "admin123"
+    bootstrap_admin_display_name: str = "超级管理员"
 
     @property
     def sqlite_path_obj(self) -> Path:
@@ -73,8 +78,16 @@ class Settings(BaseSettings):
         if self.database_backend.lower() == "sqlite":
             return str(URL.create("sqlite+pysqlite", database=str(self.sqlite_path_obj)))
         return (
-            f"mysql+pymysql://{self.mysql_user}:{self.mysql_password}"
-            f"@{self.mysql_host}:{self.mysql_port}/{self.mysql_database}?charset=utf8mb4"
+            URL.create(
+                "mysql+pymysql",
+                username=self.mysql_user,
+                password=self.mysql_password,
+                host=self.mysql_host,
+                port=self.mysql_port,
+                database=self.mysql_database,
+                query={"charset": "utf8mb4"},
+            )
+            .render_as_string(hide_password=False)
         )
 
 

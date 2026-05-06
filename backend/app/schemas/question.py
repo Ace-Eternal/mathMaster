@@ -48,6 +48,9 @@ class QuestionDetailResponse(TimestampedResponse):
     page_end: int | None = None
     review_status: str
     review_note: str | None = None
+    created_by_user_id: int | None = None
+    updated_by_user_id: int | None = None
+    deleted_by_user_id: int | None = None
     answer: QuestionAnswerResponse | None = None
     analysis: QuestionAnalysisResponse | None = None
     knowledges: list[KnowledgeLite] = Field(default_factory=list)

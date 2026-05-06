@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import analysis, chat, dictionary, files, papers, questions, review, search, settings as settings_routes, tasks, templates
+from app.api.routes import analysis, audit, auth, chat, dictionary, files, papers, practice, profile, questions, review, search, settings as settings_routes, tasks, templates, users
 from app.core.config import settings
 from app.db.init_db import init_db
 from app.services.pipeline_queue import pipeline_task_queue
@@ -39,6 +39,9 @@ def healthcheck() -> dict[str, str]:
 
 
 app.include_router(papers.router, prefix="/api/papers", tags=["papers"])
+app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
+app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(audit.router, prefix="/api/audit-logs", tags=["audit"])
 app.include_router(questions.router, prefix="/api/questions", tags=["questions"])
 app.include_router(files.router, prefix="/api/files", tags=["files"])
 app.include_router(review.router, prefix="/api/review", tags=["review"])
@@ -47,5 +50,7 @@ app.include_router(analysis.router, prefix="/api/analysis", tags=["analysis"])
 app.include_router(tasks.router, prefix="/api/tasks", tags=["tasks"])
 app.include_router(search.router, prefix="/api/search", tags=["search"])
 app.include_router(chat.router, prefix="/api/chat", tags=["chat"])
+app.include_router(practice.router, prefix="/api/practice", tags=["practice"])
+app.include_router(profile.router, prefix="/api/profile", tags=["profile"])
 app.include_router(settings_routes.router, prefix="/api/settings", tags=["settings"])
 app.include_router(templates.router, prefix="/api/templates", tags=["templates"])

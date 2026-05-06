@@ -5,6 +5,7 @@ from sqlalchemy import inspect, text
 from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
+from app.services.auth import bootstrap_auth_data
 import app.models  # noqa: F401
 
 
@@ -42,6 +43,9 @@ def ensure_sqlite_columns() -> None:
         statements.append("ALTER TABLE paper ADD COLUMN is_deleted BOOLEAN NOT NULL DEFAULT 0")
     if "deleted_at" not in existing_columns:
         statements.append("ALTER TABLE paper ADD COLUMN deleted_at DATETIME")
+    for column_name in ["created_by_user_id", "updated_by_user_id", "deleted_by_user_id"]:
+        if column_name not in existing_columns:
+            statements.append(f"ALTER TABLE paper ADD COLUMN {column_name} INTEGER")
     if "subject" in existing_columns:
         statements.append("ALTER TABLE paper DROP COLUMN subject")
 
@@ -65,6 +69,58 @@ def ensure_sqlite_columns() -> None:
             statements.append("ALTER TABLE pipeline_task ADD COLUMN attempt_count INTEGER NOT NULL DEFAULT 0")
         if "max_attempts" not in pipeline_task_columns:
             statements.append("ALTER TABLE pipeline_task ADD COLUMN max_attempts INTEGER NOT NULL DEFAULT 1")
+        for column_name in ["created_by_user_id", "updated_by_user_id"]:
+            if column_name not in pipeline_task_columns:
+                statements.append(f"ALTER TABLE pipeline_task ADD COLUMN {column_name} INTEGER")
+
+    actor_tables = [
+        "import_job",
+        "answer_sheet",
+        "conversion_job",
+        "question_answer",
+        "knowledge_point",
+        "solution_method",
+        "question_analysis",
+        "solution_template",
+        "chat_session",
+        "chat_message",
+        "question_knowledge",
+        "question_method",
+    ]
+    for table_name in actor_tables:
+        if table_name not in table_names:
+            continue
+        table_columns = {column["name"] for column in inspector.get_columns(table_name)}
+        for column_name in ["created_by_user_id", "updated_by_user_id"]:
+            if column_name not in table_columns:
+                statements.append(f"ALTER TABLE {table_name} ADD COLUMN {column_name} INTEGER")
+
+    if "question" in table_names:
+        question_columns = {column["name"] for column in inspector.get_columns("question")}
+        if "review_note" not in question_columns:
+            statements.append("ALTER TABLE question ADD COLUMN review_note TEXT")
+        for column_name in ["created_by_user_id", "updated_by_user_id", "deleted_by_user_id"]:
+            if column_name not in question_columns:
+                statements.append(f"ALTER TABLE question ADD COLUMN {column_name} INTEGER")
+
+    if "review_record" in table_names:
+        review_columns = {column["name"] for column in inspector.get_columns("review_record")}
+        if "actor_user_id" not in review_columns:
+            statements.append("ALTER TABLE review_record ADD COLUMN actor_user_id INTEGER")
+
+    if "user_permission" not in table_names and "app_user" in table_names:
+        statements.append(
+            """
+            CREATE TABLE user_permission (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                permission VARCHAR(128) NOT NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP NOT NULL,
+                UNIQUE (user_id, permission)
+            )
+            """
+        )
+        statements.append("CREATE INDEX ix_user_permission_user_id ON user_permission (user_id)")
 
     # 旧版数学单科设计遗留 subject 字段，当前模型已统一移除。
     for table_name in ["knowledge_point", "solution_method"]:
@@ -96,3 +152,7 @@ def init_db() -> None:
     configure_sqlite_runtime()
     Base.metadata.create_all(bind=engine)
     ensure_sqlite_columns()
+    from app.db.session import SessionLocal
+
+    with SessionLocal() as db:
+        bootstrap_auth_data(db)

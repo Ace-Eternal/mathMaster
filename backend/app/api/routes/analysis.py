@@ -2,9 +2,11 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import AppUser
 from app.schemas.question import AnalysisRunResponse
 from app.schemas.paper import PipelineTaskResponse
 from app.services.pipeline_queue import pipeline_task_queue
+from app.services.auth import require_permission
 
 router = APIRouter()
 
@@ -31,7 +33,7 @@ def build_task_response(task) -> PipelineTaskResponse:
 
 
 @router.post("/questions/{question_id}", response_model=AnalysisRunResponse)
-def analyze_question(question_id: int, db: Session = Depends(get_db)):
+def analyze_question(question_id: int, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("question.edit"))):
     task = pipeline_task_queue.enqueue_analysis(db, question_id=question_id, source="SINGLE")
     db.commit()
     db.refresh(task)

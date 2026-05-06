@@ -1,5 +1,7 @@
 from app.models.paper import (
     AnswerSheet,
+    AppUser,
+    AuditLog,
     ChatMessage,
     ChatSession,
     ConversionJob,
@@ -13,12 +15,22 @@ from app.models.paper import (
     QuestionKnowledge,
     QuestionMethod,
     ReviewRecord,
+    Role,
+    RolePermission,
     SolutionMethod,
     SolutionTemplate,
+    UserQuestionState,
+    UserPermission,
+    UserRole,
 )
 
 __all__ = [
     "Paper",
+    "AppUser",
+    "Role",
+    "UserRole",
+    "RolePermission",
+    "AuditLog",
     "ImportJob",
     "PipelineTask",
     "AnswerSheet",
@@ -34,4 +46,6 @@ __all__ = [
     "QuestionAnalysis",
     "ChatSession",
     "ChatMessage",
+    "UserQuestionState",
+    "UserPermission",
 ]

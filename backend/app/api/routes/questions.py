@@ -10,11 +10,12 @@ from sqlalchemy.orm import Session, selectinload
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.models import Paper, Question, QuestionAnalysis, QuestionKnowledge, QuestionMethod
+from app.models import AppUser, Paper, Question, QuestionAnalysis, QuestionKnowledge, QuestionMethod
 from app.schemas.question import QuestionDetailResponse, QuestionTagUpdateRequest
 from app.services.review import ReviewService
 from app.services.storage.base import FileStorageService
 from app.services.storage.factory import get_storage_service
+from app.services.auth import require_permission
 
 router = APIRouter()
 
@@ -60,6 +61,9 @@ def _build_question_detail_response_payload(question: Question, *, assets: dict[
         "page_end": question.page_end,
         "review_status": question.review_status,
         "review_note": question.review_note,
+        "created_by_user_id": question.created_by_user_id,
+        "updated_by_user_id": question.updated_by_user_id,
+        "deleted_by_user_id": question.deleted_by_user_id,
         "answer": answer_payload,
         "analysis": analysis_payload,
         "knowledges": [link.knowledge_point for link in question.knowledges if link.knowledge_point],
@@ -228,6 +232,7 @@ def update_question_tags(
     payload: QuestionTagUpdateRequest,
     request: Request,
     db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("question.edit")),
 ):
     question = db.execute(
         select(Question)

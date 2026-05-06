@@ -2,6 +2,7 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { api } from '../api/client'
+import AnswerVisibilityButton from '../components/AnswerVisibilityButton.vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 
 const props = defineProps<{ id: string }>()
@@ -22,10 +23,11 @@ const activeGenerationId = ref<string | null>(null)
 const activeAssistantMessage = ref<any>(null)
 const selectedModel = ref<string | null>(null)
 const defaultChatModel = ref<string | null>(null)
+const answerVisible = ref(false)
 const analysisTasks = ref<any[]>([])
 const analysisSubmitting = ref(false)
 let analysisRefreshTimer: ReturnType<typeof window.setInterval> | null = null
-const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://127.0.0.1:8000/api'
+const apiBase = import.meta.env.VITE_API_BASE_URL || '/api'
 const STOP_NOTICE = '\n\n> 已停止生成'
 
 const questionImages = computed(() => detail.value?.assets?.question_images || [])
@@ -479,10 +481,14 @@ onBeforeUnmount(() => {
           </div>
         </div>
 
-        <h3>答案</h3>
-        <div class="detail-markdown-surface">
-          <MarkdownContent :content="detail.answer?.answer_text || detail.assets.answer_md" />
+        <div class="answer-head">
+          <h3>答案</h3>
+          <AnswerVisibilityButton :visible="answerVisible" @toggle="answerVisible = !answerVisible" />
         </div>
+        <template v-if="answerVisible">
+          <div class="detail-markdown-surface">
+            <MarkdownContent :content="detail.answer?.answer_text || detail.assets.answer_md || '当前题目暂无答案。'" />
+          </div>
 
         <div v-if="answerImages.length" class="image-stack">
           <h3>答案图片</h3>
@@ -496,6 +502,8 @@ onBeforeUnmount(() => {
             </div>
           </div>
         </div>
+        </template>
+        <div v-else class="surface-note">答案已隐藏。</div>
       </section>
 
       <section class="panel">
@@ -718,6 +726,13 @@ onBeforeUnmount(() => {
   display: grid;
   gap: 14px;
   margin: 18px 0;
+}
+
+.answer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
 }
 
 .detail-markdown-surface {

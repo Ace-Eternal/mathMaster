@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.models import SolutionTemplate
+from app.models import AppUser, SolutionTemplate
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateResponse, SolutionTemplateUpdate
 from app.services.storage.factory import get_storage_service
+from app.services.audit import entity_summary, set_created_actor, set_updated_actor, write_audit_log
+from app.services.auth import request_meta, require_permission
 
 router = APIRouter()
 
@@ -48,8 +50,15 @@ def get_template(template_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("", response_model=SolutionTemplateResponse)
-def create_template(payload: SolutionTemplateCreate, db: Session = Depends(get_db)):
+def create_template(
+    payload: SolutionTemplateCreate,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("template.manage")),
+):
+    actor = user if isinstance(user, AppUser) else None
     template = SolutionTemplate(**payload.model_dump())
+    set_created_actor(template, actor)
     db.add(template)
     db.commit()
     db.refresh(template)
@@ -59,6 +68,7 @@ def create_template(payload: SolutionTemplateCreate, db: Session = Depends(get_d
         saved_key = _save_template_file(template)
         template.template_md_path = saved_key
         db.add(template)
+        write_audit_log(db, actor=actor, action="template.create", resource_type="solution_template", resource_id=template.id, after=entity_summary(template, ["name", "description", "tags"]), **request_meta(request))
         db.commit()
         db.refresh(template)
         return template
@@ -75,7 +85,14 @@ def create_template(payload: SolutionTemplateCreate, db: Session = Depends(get_d
 
 
 @router.patch("/{template_id}", response_model=SolutionTemplateResponse)
-def update_template(template_id: int, payload: SolutionTemplateUpdate, db: Session = Depends(get_db)):
+def update_template(
+    template_id: int,
+    payload: SolutionTemplateUpdate,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("template.manage")),
+):
+    actor = user if isinstance(user, AppUser) else None
     template = db.get(SolutionTemplate, template_id)
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -87,15 +104,18 @@ def update_template(template_id: int, payload: SolutionTemplateUpdate, db: Sessi
         raise HTTPException(status_code=422, detail="Template content cannot be null")
 
     content_changed = "content" in data
+    before = entity_summary(template, ["name", "description", "tags", "template_md_path"])
     old_content = template.content
     old_path = template.template_md_path
     for field, value in data.items():
         setattr(template, field, value)
+    set_updated_actor(template, actor)
 
     try:
         if content_changed:
             template.template_md_path = _save_template_file(template)
         db.add(template)
+        write_audit_log(db, actor=actor, action="template.update", resource_type="solution_template", resource_id=template.id, before=before, after=entity_summary(template, ["name", "description", "tags", "template_md_path"]), **request_meta(request))
         db.commit()
         db.refresh(template)
         return template
@@ -110,7 +130,13 @@ def update_template(template_id: int, payload: SolutionTemplateUpdate, db: Sessi
 
 
 @router.delete("/{template_id}")
-def delete_template(template_id: int, db: Session = Depends(get_db)):
+def delete_template(
+    template_id: int,
+    request: Request = None,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("template.manage")),
+):
+    actor = user if isinstance(user, AppUser) else None
     template = db.get(SolutionTemplate, template_id)
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")
@@ -118,6 +144,7 @@ def delete_template(template_id: int, db: Session = Depends(get_db)):
     try:
         if template.template_md_path:
             get_storage_service().delete_file(template.template_md_path)
+        write_audit_log(db, actor=actor, action="template.delete", resource_type="solution_template", resource_id=template.id, before=entity_summary(template, ["name", "description", "tags"]), **request_meta(request))
         db.delete(template)
         db.commit()
         return {"ok": True}

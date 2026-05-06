@@ -11,11 +11,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes import papers as paper_routes
 from app.api.routes import templates as template_routes
+from app.api.routes import users as user_routes
 from app.core.config import settings
 from app.db.base import Base
 from app.db import init_db as init_db_module
 from app.db.session import get_db
-from app.models import AnswerSheet, ChatMessage, ChatSession, ConversionJob, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, SolutionMethod, SolutionTemplate
+from app.models import AnswerSheet, AppUser, AuditLog, ChatMessage, ChatSession, ConversionJob, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, Role, RolePermission, SolutionMethod, SolutionTemplate, UserPermission
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest, ReviewUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
@@ -26,6 +27,9 @@ from app.services import pipeline_queue as pipeline_queue_module
 from app.services.pipeline_queue import PipelineTaskQueue
 from app.services.pipeline_queue import TASK_TYPE_MINEU_CONVERT, TASK_TYPE_SLICE_MATCH
 from app.services.chat import ChatTutorService, chat_generation_registry
+from app.services.auth import authenticate_user, bootstrap_auth_data, create_access_token, user_permissions
+from app.services.practice import PracticeService
+from app.services.profile import ProfileService
 from app.services.review import ReviewService
 from app.services.search import SearchService
 from app.services.storage.local import LocalFileStorageService
@@ -76,7 +80,16 @@ def test_llm_prompts_pin_project_output_contracts():
 def make_pipeline_queue_session(tmp_path):
     engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'queue.db'}", connect_args={"check_same_thread": False})
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine, autoflush=False, autocommit=False, class_=Session)
+    session_factory = sessionmaker(bind=engine, autoflush=False, autocommit=False, class_=Session)
+    with session_factory() as db:
+        bootstrap_auth_data(db)
+    return session_factory
+
+
+def auth_headers(session_factory) -> dict[str, str]:
+    with session_factory() as db:
+        user = db.execute(select(AppUser).where(AppUser.username == "admin")).scalar_one()
+        return {"Authorization": f"Bearer {create_access_token(user)}"}
 
 
 def add_queue_test_paper(db: Session, title: str = "测试卷") -> Paper:
@@ -89,6 +102,18 @@ def add_queue_test_paper(db: Session, title: str = "测试卷") -> Paper:
 def make_papers_api_client(session_factory):
     app = FastAPI()
     app.include_router(paper_routes.router, prefix="/api/papers")
+
+    def override_get_db():
+        with session_factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
+def make_users_api_client(session_factory):
+    app = FastAPI()
+    app.include_router(user_routes.router, prefix="/api/users")
 
     def override_get_db():
         with session_factory() as db:
@@ -112,6 +137,121 @@ def test_pipeline_task_queue_enqueue_creates_queued_task(tmp_path):
         assert task.paper_id == paper.id
 
 
+def test_auth_bootstrap_creates_super_admin_with_all_permissions(tmp_path):
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        bootstrap_auth_data(db)
+        user = authenticate_user(db, "admin", "admin123")
+        roles, permissions = user_permissions(db, user.id)
+
+        assert "SUPER_ADMIN" in roles
+        assert "*" in permissions
+        assert create_access_token(user)
+        assert db.execute(select(Role).where(Role.code == "SUPER_ADMIN")).scalar_one_or_none() is not None
+        assert db.execute(select(RolePermission).where(RolePermission.permission == "*")).scalar_one_or_none() is not None
+
+
+def test_auth_bootstrap_assigns_student_to_existing_users_and_merges_direct_permissions():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user = AppUser(username="student", display_name="学生", password_hash="x", status="ACTIVE")
+        db.add(user)
+        db.commit()
+
+        bootstrap_auth_data(db)
+        db.add(UserPermission(user_id=user.id, permission="paper.upload"))
+        db.commit()
+
+        roles, permissions = user_permissions(db, user.id)
+
+        assert roles == ["STUDENT"]
+        assert "SUPER_ADMIN" not in roles
+        assert {"profile.read", "practice.use", "chat.use", "paper.upload"}.issubset(set(permissions))
+        assert "paper.delete" not in permissions
+
+
+def test_users_api_requires_super_admin_role(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    with session_factory() as db:
+        student = AppUser(username="student", display_name="学生", password_hash="x", status="ACTIVE")
+        db.add(student)
+        db.commit()
+        bootstrap_auth_data(db)
+        student_token = create_access_token(student)
+
+    client = make_users_api_client(session_factory)
+
+    forbidden = client.get("/api/users", headers={"Authorization": f"Bearer {student_token}"})
+    allowed = client.get("/api/users", headers=auth_headers(session_factory))
+    created = client.post(
+        "/api/users",
+        headers=auth_headers(session_factory),
+        json={"username": "created-student", "display_name": "新学生", "password": "pass123"},
+    )
+
+    assert forbidden.status_code == 403
+    assert allowed.status_code == 200
+    assert created.status_code == 200
+    assert created.json()["roles"] == ["STUDENT"]
+
+
+def test_profile_revised_questions_are_owned_by_audit_actor_not_latest_editor():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user_one = AppUser(username="u1", display_name="用户一", password_hash="x", status="ACTIVE")
+        user_two = AppUser(username="u2", display_name="用户二", password_hash="x", status="ACTIVE")
+        db.add_all([user_one, user_two])
+        db.flush()
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash", created_by_user_id=user_one.id)
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="函数题", review_status="APPROVED", updated_by_user_id=user_two.id)
+        db.add(question)
+        db.flush()
+        db.add_all(
+            [
+                AuditLog(actor_user_id=user_one.id, action="question.update", resource_type="question", resource_id=str(question.id)),
+                AuditLog(actor_user_id=user_two.id, action="question.update", resource_type="question", resource_id=str(question.id)),
+            ]
+        )
+        db.commit()
+
+        user_one_result = ProfileService(db).revised_questions(user_one, page=1, page_size=10)
+        user_two_result = ProfileService(db).revised_questions(user_two, page=1, page_size=10)
+
+        assert user_one_result.total == 1
+        assert user_two_result.total == 1
+        assert user_one_result.items[0]["question_id"] == question.id
+
+
+def test_practice_state_is_isolated_by_user():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user_one = AppUser(username="u1", display_name="用户一", password_hash="x", status="ACTIVE")
+        user_two = AppUser(username="u2", display_name="用户二", password_hash="x", status="ACTIVE")
+        db.add_all([user_one, user_two])
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="函数题", review_status="APPROVED")
+        db.add(question)
+        db.commit()
+
+        service = PracticeService(db)
+        service.update_state(user=user_one, question_id=question.id, practice_status="IN_PROGRESS", is_favorited=True)
+        user_two_state = service.get_state(user=user_two, question_id=question.id)
+
+        assert service.summary(user=user_one).in_progress_count == 1
+        assert service.summary(user=user_one).favorite_count == 1
+        assert service.summary(user=user_two).in_progress_count == 0
+        assert user_two_state.practice_status == "NOT_STARTED"
+        assert user_two_state.is_favorited is False
+
+
 def test_run_pipeline_api_enqueues_and_returns_immediately(tmp_path, monkeypatch):
     session_factory = make_pipeline_queue_session(tmp_path)
     queue = PipelineTaskQueue()
@@ -123,7 +263,7 @@ def test_run_pipeline_api_enqueues_and_returns_immediately(tmp_path, monkeypatch
         paper_id = paper.id
 
     client = make_papers_api_client(session_factory)
-    response = client.post(f"/api/papers/{paper_id}/pipeline/run-all")
+    response = client.post(f"/api/papers/{paper_id}/pipeline/run-all", headers=auth_headers(session_factory))
 
     assert response.status_code == 200
     payload = response.json()
@@ -166,7 +306,7 @@ def test_batch_run_api_enqueues_in_order_without_duplicate_tasks(tmp_path, monke
         paper_two_id = paper_two.id
 
     client = make_papers_api_client(session_factory)
-    response = client.post("/api/papers/batch/run", json={"paper_ids": [paper_one_id, paper_one_id, paper_two_id]})
+    response = client.post("/api/papers/batch/run", json={"paper_ids": [paper_one_id, paper_one_id, paper_two_id]}, headers=auth_headers(session_factory))
 
     assert response.status_code == 200
     payload = response.json()
