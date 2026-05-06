@@ -56,6 +56,9 @@ class QuestionSummary(ORMModel):
     review_note: str | None = None
     page_start: int | None = None
     page_end: int | None = None
+    created_by_user_id: int | None = None
+    updated_by_user_id: int | None = None
+    deleted_by_user_id: int | None = None
 
 
 class PaperResponse(TimestampedResponse):
@@ -71,6 +74,9 @@ class PaperResponse(TimestampedResponse):
     status: str
     is_deleted: bool = False
     deleted_at: datetime | None = None
+    created_by_user_id: int | None = None
+    updated_by_user_id: int | None = None
+    deleted_by_user_id: int | None = None
     latest_error_message: str | None = None
     last_pipeline_at: datetime | None = None
     answer_sheet: AnswerSheetResponse | None = None

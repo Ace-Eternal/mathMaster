@@ -19,6 +19,7 @@ from app.models import (
     ChatSession,
     ConversionJob,
     ImportJob,
+    AppUser,
     Paper,
     PipelineTask,
     Question,
@@ -27,7 +28,9 @@ from app.models import (
     QuestionKnowledge,
     QuestionMethod,
     ReviewRecord,
+    UserQuestionState,
 )
+from app.services.audit import entity_summary, set_created_actor, set_updated_actor, write_audit_log
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
 from app.services.review_state import (
@@ -1167,6 +1170,8 @@ class PaperPipelineService:
         region: str | None,
         grade_level: str | None,
         term: str | None,
+        actor: AppUser | None = None,
+        audit_meta: dict[str, str | None] | None = None,
     ) -> Paper:
         paper_asset = UploadedAsset(filename=paper_file.filename or "paper.pdf", content=await paper_file.read())
         answer_asset = None
@@ -1180,6 +1185,8 @@ class PaperPipelineService:
             region=region,
             grade_level=grade_level,
             term=term,
+            actor=actor,
+            audit_meta=audit_meta,
         )
 
     async def import_folder_uploads(
@@ -1187,6 +1194,8 @@ class PaperPipelineService:
         *,
         paper_files: list[UploadFile],
         answer_files: list[UploadFile],
+        actor: AppUser | None = None,
+        audit_meta: dict[str, str | None] | None = None,
     ) -> tuple[ImportJob, list[dict[str, Any]]]:
         paper_assets = [UploadedAsset(filename=item.filename or "paper.pdf", content=await item.read()) for item in paper_files]
         answer_assets = [UploadedAsset(filename=item.filename or "answer.pdf", content=await item.read()) for item in answer_files]
@@ -1202,6 +1211,8 @@ class PaperPipelineService:
                 region=None,
                 grade_level=None,
                 term=None,
+                actor=actor,
+                audit_meta=audit_meta,
             )
             imported_items.append(
                 {
@@ -1224,7 +1235,17 @@ class PaperPipelineService:
             "items": imported_items,
         }
         import_job = ImportJob(status="COMPLETED", summary_json=json.dumps(summary, ensure_ascii=False))
+        set_created_actor(import_job, actor)
         self.db.add(import_job)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.import_folder",
+            resource_type="import_job",
+            resource_id=None,
+            after={"paper_count": len(imported_items), "paired_count": summary["paired_count"]},
+            **(audit_meta or {}),
+        )
         self.db.commit()
         self.db.refresh(import_job)
         return import_job, imported_items
@@ -1291,12 +1312,14 @@ class PaperPipelineService:
         self._decorate_papers([paper])
         return paper
 
-    def update_paper(self, paper_id: int, payload: dict[str, Any]) -> Paper:
+    def update_paper(self, paper_id: int, payload: dict[str, Any], *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Paper:
         paper = self.get_paper(paper_id)
+        before = entity_summary(paper, ["title", "year", "source", "grade_level", "region", "term", "status"])
         for field in ["title", "year", "source", "grade_level", "region", "term", "status"]:
             value = payload.get(field)
             if value is not None:
                 setattr(paper, field, value)
+        set_updated_actor(paper, actor)
 
         if payload.get("has_answer") is not None:
             has_answer = bool(payload["has_answer"])
@@ -1310,11 +1333,22 @@ class PaperPipelineService:
                 paper.answer_sheet.answer_pdf_hash = None
             elif paper.answer_sheet.answer_pdf_path:
                 paper.answer_sheet.status = "READY"
+            set_updated_actor(paper.answer_sheet, actor)
 
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.update",
+            resource_type="paper",
+            resource_id=paper.id,
+            before=before,
+            after=entity_summary(paper, ["title", "year", "source", "grade_level", "region", "term", "status"]),
+            **(audit_meta or {}),
+        )
         self.db.commit()
         return self.get_paper(paper_id)
 
-    async def bind_answer_upload(self, paper_id: int, answer_file: UploadFile) -> Paper:
+    async def bind_answer_upload(self, paper_id: int, answer_file: UploadFile, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Paper:
         paper = self.get_paper(paper_id)
         answer_asset = UploadedAsset(filename=answer_file.filename or "answer.pdf", content=await answer_file.read())
         answer_path = build_storage_key("raw", "unpaired", "answer", filename=random_prefixed_name(answer_asset.filename))
@@ -1322,29 +1356,55 @@ class PaperPipelineService:
 
         if paper.answer_sheet is None:
             paper.answer_sheet = AnswerSheet(paper_id=paper.id, has_answer=True, status="READY")
+            set_created_actor(paper.answer_sheet, actor)
             self.db.add(paper.answer_sheet)
 
+        before = entity_summary(paper.answer_sheet, ["has_answer", "status", "answer_pdf_path"])
         paper.answer_sheet.answer_pdf_path = answer_path
         paper.answer_sheet.answer_pdf_hash = sha256_bytes(answer_asset.content)
         paper.answer_sheet.has_answer = True
         paper.answer_sheet.status = "READY"
+        set_updated_actor(paper.answer_sheet, actor)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.bind_answer",
+            resource_type="paper",
+            resource_id=paper.id,
+            before=before,
+            after=entity_summary(paper.answer_sheet, ["has_answer", "status", "answer_pdf_path"]),
+            **(audit_meta or {}),
+        )
         self.db.commit()
         return self.get_paper(paper_id)
 
-    def unbind_answer(self, paper_id: int) -> Paper:
+    def unbind_answer(self, paper_id: int, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Paper:
         paper = self.get_paper(paper_id)
         if paper.answer_sheet is None:
             paper.answer_sheet = AnswerSheet(paper_id=paper.id, has_answer=False, status="MISSING")
+            set_created_actor(paper.answer_sheet, actor)
             self.db.add(paper.answer_sheet)
         else:
+            before = entity_summary(paper.answer_sheet, ["has_answer", "status", "answer_pdf_path"])
             paper.answer_sheet.answer_pdf_path = None
             paper.answer_sheet.answer_pdf_hash = None
             paper.answer_sheet.has_answer = False
             paper.answer_sheet.status = "MISSING"
+            set_updated_actor(paper.answer_sheet, actor)
+            write_audit_log(
+                self.db,
+                actor=actor,
+                action="paper.unbind_answer",
+                resource_type="paper",
+                resource_id=paper.id,
+                before=before,
+                after=entity_summary(paper.answer_sheet, ["has_answer", "status", "answer_pdf_path"]),
+                **(audit_meta or {}),
+            )
         self.db.commit()
         return self.get_paper(paper_id)
 
-    def hard_delete_paper(self, paper_id: int) -> dict[str, int]:
+    def hard_delete_paper(self, paper_id: int, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> dict[str, int]:
         paper = self.get_paper(paper_id)
         running_task = self.db.execute(
             select(PipelineTask).where(PipelineTask.paper_id == paper_id, PipelineTask.status == "RUNNING")
@@ -1368,20 +1428,41 @@ class PaperPipelineService:
             self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id.in_(question_ids)).delete(synchronize_session=False)
             self.db.query(QuestionAnalysis).filter(QuestionAnalysis.question_id.in_(question_ids)).delete(synchronize_session=False)
             self.db.query(QuestionAnswer).filter(QuestionAnswer.question_id.in_(question_ids)).delete(synchronize_session=False)
+            self.db.query(UserQuestionState).filter(UserQuestionState.question_id.in_(question_ids)).delete(synchronize_session=False)
 
         self.db.query(ReviewRecord).filter(ReviewRecord.paper_id == paper_id).delete(synchronize_session=False)
         self.db.query(Question).filter(Question.paper_id == paper_id).delete(synchronize_session=False)
         self.db.query(AnswerSheet).filter(AnswerSheet.paper_id == paper_id).delete(synchronize_session=False)
         self.db.query(ConversionJob).filter(ConversionJob.paper_id == paper_id).delete(synchronize_session=False)
         self.db.query(PipelineTask).filter(PipelineTask.paper_id == paper_id).delete(synchronize_session=False)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.delete",
+            resource_type="paper",
+            resource_id=paper_id,
+            before=entity_summary(paper, ["title", "year", "region", "grade_level", "status"]),
+            after={"deleted_file_count": deleted_file_count},
+            **(audit_meta or {}),
+        )
         self.db.query(Paper).filter(Paper.id == paper_id).delete(synchronize_session=False)
         self.db.commit()
         return {"deleted_file_count": deleted_file_count}
 
-    def restore_paper(self, paper_id: int) -> Paper:
+    def restore_paper(self, paper_id: int, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Paper:
         paper = self.get_paper(paper_id)
         paper.is_deleted = False
         paper.deleted_at = None
+        set_updated_actor(paper, actor)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.restore",
+            resource_type="paper",
+            resource_id=paper.id,
+            after=entity_summary(paper, ["title", "status", "is_deleted"]),
+            **(audit_meta or {}),
+        )
         self.db.commit()
         return self.get_paper(paper_id)
 
@@ -1548,6 +1629,8 @@ class PaperPipelineService:
         region: str | None,
         grade_level: str | None,
         term: str | None,
+        actor: AppUser | None = None,
+        audit_meta: dict[str, str | None] | None = None,
     ) -> Paper:
         paper_meta = self._extract_meta(paper_asset.filename, title)
         paper_key = build_storage_key("raw", "unpaired", "paper", filename=random_prefixed_name(paper_asset.filename))
@@ -1563,6 +1646,7 @@ class PaperPipelineService:
             paper_pdf_hash=sha256_bytes(paper_asset.content),
             status="RAW",
         )
+        set_created_actor(paper, actor)
         self.db.add(paper)
         self.db.flush()
 
@@ -1581,7 +1665,17 @@ class PaperPipelineService:
             has_answer=has_answer,
             status="READY" if has_answer else "MISSING",
         )
+        set_created_actor(answer_sheet, actor)
         self.db.add(answer_sheet)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="paper.upload",
+            resource_type="paper",
+            resource_id=paper.id,
+            after=entity_summary(paper, ["title", "year", "source", "grade_level", "region", "term", "status"]),
+            **(audit_meta or {}),
+        )
         self.db.commit()
         return self.get_paper(paper.id)
 

@@ -78,6 +78,15 @@ a {
   flex-wrap: wrap;
 }
 
+.topbar__user {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--mm-text-soft);
+  font-size: 13px;
+  white-space: nowrap;
+}
+
 .brand {
   font-size: 24px;
   font-weight: 800;

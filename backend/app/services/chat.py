@@ -235,21 +235,21 @@ class ChatTutorService:
             for model_name in self.llm_gateway.list_chat_models()
         ]
 
-    def update_session_model(self, *, session_id: int, model_name: str | None) -> ChatSession:
-        session = self._load_session(session_id)
+    def update_session_model(self, *, session_id: int, model_name: str | None, user_id: str | None = None) -> ChatSession:
+        session = self.get_session(session_id=session_id, user_id=user_id)
         session.selected_model = (model_name or "").strip() or None
         self.db.add(session)
         self.db.commit()
         return self._load_session(session_id)
 
-    def delete_session(self, *, session_id: int, question_id: int | None = None) -> None:
-        session = self.get_session(session_id=session_id, question_id=question_id)
+    def delete_session(self, *, session_id: int, question_id: int | None = None, user_id: str | None = None) -> None:
+        session = self.get_session(session_id=session_id, question_id=question_id, user_id=user_id)
         self.db.query(ChatMessage).filter(ChatMessage.session_id == session.id).delete()
         self.db.delete(session)
         self.db.commit()
 
-    def clear_sessions(self, *, question_id: int) -> int:
-        sessions = self.list_sessions(question_id=question_id)
+    def clear_sessions(self, *, question_id: int, user_id: str | None = None) -> int:
+        sessions = self.list_sessions(question_id=question_id, user_id=user_id)
         session_ids = [session.id for session in sessions]
         if not session_ids:
             return 0
@@ -263,20 +263,25 @@ class ChatTutorService:
             select(Question).options(selectinload(Question.answer), selectinload(Question.analysis)).where(Question.id == question_id)
         ).scalar_one()
 
-    def list_sessions(self, *, question_id: int) -> list[ChatSession]:
+    def list_sessions(self, *, question_id: int, user_id: str | None = None) -> list[ChatSession]:
+        stmt = (
+            select(ChatSession)
+            .options(selectinload(ChatSession.messages))
+            .where(ChatSession.question_id == question_id)
+            .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
+        )
+        if user_id is not None:
+            stmt = stmt.where(ChatSession.user_id == user_id)
         return list(
-            self.db.execute(
-                select(ChatSession)
-                .options(selectinload(ChatSession.messages))
-                .where(ChatSession.question_id == question_id)
-                .order_by(ChatSession.updated_at.desc(), ChatSession.id.desc())
-            ).scalars()
+            self.db.execute(stmt).scalars()
         )
 
-    def get_session(self, *, session_id: int, question_id: int | None = None) -> ChatSession:
+    def get_session(self, *, session_id: int, question_id: int | None = None, user_id: str | None = None) -> ChatSession:
         session = self._load_session(session_id)
         if question_id is not None and session.question_id != question_id:
             raise ValueError("Chat session not found for question")
+        if user_id is not None and session.user_id != user_id:
+            raise ValueError("Chat session not found for user")
         return session
 
     def _ensure_session(
@@ -294,6 +299,8 @@ class ChatTutorService:
         )
         normalized_model_name = (model_name or "").strip() or None
         if session:
+            if user_id is not None and session.user_id != user_id:
+                raise ValueError("Chat session not found for user")
             if normalized_model_name and session.selected_model != normalized_model_name:
                 session.selected_model = normalized_model_name
                 self.db.add(session)

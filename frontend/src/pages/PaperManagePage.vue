@@ -186,6 +186,8 @@ onMounted(loadPapers)
                 <span>地区：{{ row.region || '-' }}</span>
                 <span>年级：{{ row.grade_level || '-' }}</span>
                 <span>学期：{{ row.term || '-' }}</span>
+                <span>创建用户：{{ row.created_by_user_id || '-' }}</span>
+                <span>最近修改：{{ row.updated_by_user_id || '-' }}</span>
               </div>
             </div>
           </template>

@@ -5,6 +5,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import AppUser
 from app.schemas.question import (
     ChatMessageRequest,
     ChatModelOptionResponse,
@@ -13,15 +14,16 @@ from app.schemas.question import (
     ChatSessionResponse,
 )
 from app.services.chat import ChatTutorService
+from app.services.auth import require_permission
 from app.services.llm.gateway import LLMGateway
 
 router = APIRouter()
 
 
 @router.get("/questions/{question_id}/sessions", response_model=list[ChatSessionListItemResponse])
-def list_sessions(question_id: int, db: Session = Depends(get_db)):
+def list_sessions(question_id: int, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     service = ChatTutorService(db, LLMGateway())
-    sessions = service.list_sessions(question_id=question_id)
+    sessions = service.list_sessions(question_id=question_id, user_id=str(user.id))
     items = []
     for session in sessions:
         last_message = session.messages[-1] if session.messages else None
@@ -42,21 +44,21 @@ def list_sessions(question_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/sessions/{session_id}", response_model=ChatSessionResponse)
-def get_session(session_id: int, question_id: int | None = None, db: Session = Depends(get_db)):
+def get_session(session_id: int, question_id: int | None = None, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     service = ChatTutorService(db, LLMGateway())
     try:
-        session = service.get_session(session_id=session_id, question_id=question_id)
+        session = service.get_session(session_id=session_id, question_id=question_id, user_id=str(user.id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ChatSessionResponse.model_validate(session)
 
 
 @router.post("/sessions/message", response_model=ChatSessionResponse)
-def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
+def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     session = ChatTutorService(db, LLMGateway()).send(
         question_id=payload.question_id,
         content=payload.content,
-        user_id=payload.user_id,
+        user_id=str(user.id),
         session_id=payload.session_id,
         model_name=payload.model_name,
     )
@@ -64,11 +66,11 @@ def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/sessions/message/stream")
-def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db)):
+def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     _, event_iter = ChatTutorService(db, LLMGateway()).stream_send(
         question_id=payload.question_id,
         content=payload.content,
-        user_id=payload.user_id,
+        user_id=str(user.id),
         session_id=payload.session_id,
         model_name=payload.model_name,
     )
@@ -95,11 +97,12 @@ def list_chat_models(db: Session = Depends(get_db)):
 
 
 @router.patch("/sessions/{session_id}/model", response_model=ChatSessionResponse)
-def update_session_model(session_id: int, payload: ChatSessionModelUpdateRequest, db: Session = Depends(get_db)):
+def update_session_model(session_id: int, payload: ChatSessionModelUpdateRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     try:
         session = ChatTutorService(db, LLMGateway()).update_session_model(
             session_id=session_id,
             model_name=payload.model_name,
+            user_id=str(user.id),
         )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
@@ -107,16 +110,16 @@ def update_session_model(session_id: int, payload: ChatSessionModelUpdateRequest
 
 
 @router.delete("/sessions/{session_id}")
-def delete_session(session_id: int, question_id: int | None = None, db: Session = Depends(get_db)):
+def delete_session(session_id: int, question_id: int | None = None, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     service = ChatTutorService(db, LLMGateway())
     try:
-        service.delete_session(session_id=session_id, question_id=question_id)
+        service.delete_session(session_id=session_id, question_id=question_id, user_id=str(user.id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     return {"ok": True, "session_id": session_id}
 
 
 @router.delete("/questions/{question_id}/sessions")
-def clear_question_sessions(question_id: int, db: Session = Depends(get_db)):
-    deleted_count = ChatTutorService(db, LLMGateway()).clear_sessions(question_id=question_id)
+def clear_question_sessions(question_id: int, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
+    deleted_count = ChatTutorService(db, LLMGateway()).clear_sessions(question_id=question_id, user_id=str(user.id))
     return {"ok": True, "question_id": question_id, "deleted_count": deleted_count}

@@ -8,7 +8,8 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session, selectinload
 from slugify import slugify
 
-from app.models import ChatMessage, ChatSession, Paper, Question, QuestionAnalysis, QuestionAnswer, QuestionKnowledge, QuestionMethod, ReviewRecord
+from app.models import AppUser, ChatMessage, ChatSession, Paper, Question, QuestionAnalysis, QuestionAnswer, QuestionKnowledge, QuestionMethod, ReviewRecord, UserQuestionState
+from app.services.audit import entity_summary, set_created_actor, set_updated_actor, write_audit_log
 from app.schemas.question import QuestionCreateRequest, QuestionDetailResponse, QuestionUpdateRequest, ReviewQueueItem, ReviewUpdateRequest
 from app.services.review_state import (
     is_analysis_failure_note,
@@ -55,7 +56,7 @@ class ReviewService:
             self.db.commit()
         return updated
 
-    def create_question(self, paper_id: int, payload: QuestionCreateRequest) -> Question:
+    def create_question(self, paper_id: int, payload: QuestionCreateRequest, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Question:
         paper = self._get_paper(paper_id)
         question = Question(
             paper_id=paper.id,
@@ -67,6 +68,7 @@ class ReviewService:
             review_status=payload.review_status or "PENDING",
             review_note=payload.review_note,
         )
+        set_created_actor(question, actor)
         self.db.add(question)
         self.db.flush()
 
@@ -78,15 +80,25 @@ class ReviewService:
                 match_status="MANUAL_FIXED",
                 match_confidence=1.0,
             )
+            set_created_actor(answer, actor)
             self.db.add(answer)
         self.db.flush()
 
         self._sync_paper_question_files(paper.id)
         self._sync_paper_review_status(paper.id)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="question.create",
+            resource_type="question",
+            resource_id=question.id,
+            after=entity_summary(question, ["paper_id", "question_no", "question_type", "review_status"]),
+            **(audit_meta or {}),
+        )
         self.db.commit()
         return self._load_question(question.id)
 
-    def update_question(self, question_id: int, payload: ReviewUpdateRequest) -> Question:
+    def update_question(self, question_id: int, payload: ReviewUpdateRequest, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Question:
         question = self._load_question(question_id)
         before = {
             "question_no": question.question_no,
@@ -112,12 +124,14 @@ class ReviewService:
         if payload.page_end is not None:
             question.page_end = payload.page_end
         question.review_status = payload.review_status
+        set_updated_actor(question, actor)
 
         if payload.answer_text is not None:
             answer_text = (normalize_answer_text_for_markdown(payload.answer_text) or "").strip()
             if answer_text:
                 if question.answer is None:
                     question.answer = QuestionAnswer(question_id=question.id, match_status="MANUAL_FIXED", match_confidence=1.0)
+                    set_created_actor(question.answer, actor)
                     self.db.add(question.answer)
                 question.answer.answer_text = answer_text
                 question.answer.match_status = payload.match_status or "MANUAL_FIXED"
@@ -137,15 +151,26 @@ class ReviewService:
             after_data_json=json.dumps(payload.model_dump(), ensure_ascii=False),
             comment=payload.comment,
             reviewer_id=payload.reviewer_id,
+            actor_user_id=actor.id if actor else None,
         )
         self.db.add(review)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="question.review_update" if payload.review_type == "MATCH_CORRECTION" else "question.update",
+            resource_type="question",
+            resource_id=question.id,
+            before=before,
+            after=payload.model_dump(),
+            **(audit_meta or {}),
+        )
         self.db.flush()
         self._sync_paper_question_files(question.paper_id)
         self._sync_paper_review_status(question.paper_id)
         self.db.commit()
         return self._load_question(question.id)
 
-    def patch_question(self, paper_id: int, question_id: int, payload: QuestionUpdateRequest) -> Question:
+    def patch_question(self, paper_id: int, question_id: int, payload: QuestionUpdateRequest, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Question:
         review_payload = ReviewUpdateRequest(
             question_no=payload.question_no,
             question_type=payload.question_type,
@@ -159,12 +184,12 @@ class ReviewService:
             review_type="SLICE_EDIT",
             comment="通过试卷切片结果列表编辑题目",
         )
-        question = self.update_question(question_id, review_payload)
+        question = self.update_question(question_id, review_payload, actor=actor, audit_meta=audit_meta)
         if question.paper_id != paper_id:
             raise HTTPException(status_code=404, detail="Question not found in target paper")
         return question
 
-    def delete_question(self, paper_id: int, question_id: int) -> None:
+    def delete_question(self, paper_id: int, question_id: int, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> None:
         question = self._load_question(question_id)
         if question.paper_id != paper_id:
             raise HTTPException(status_code=404, detail="Question not found in target paper")
@@ -172,6 +197,7 @@ class ReviewService:
         cleanup_paths = self._collect_question_paths(question)
         self.db.query(QuestionMethod).filter(QuestionMethod.question_id == question.id).delete()
         self.db.query(QuestionKnowledge).filter(QuestionKnowledge.question_id == question.id).delete()
+        self.db.query(UserQuestionState).filter(UserQuestionState.question_id == question.id).delete()
         if question.analysis is not None:
             self.db.delete(question.analysis)
         if question.answer is not None:
@@ -182,6 +208,15 @@ class ReviewService:
         for review in question.reviews:
             review.question_id = None
             self.db.add(review)
+        write_audit_log(
+            self.db,
+            actor=actor,
+            action="question.delete",
+            resource_type="question",
+            resource_id=question.id,
+            before=entity_summary(question, ["paper_id", "question_no", "question_type", "review_status"]),
+            **(audit_meta or {}),
+        )
         self.db.delete(question)
         self.db.flush()
         self._sync_paper_question_files(paper_id, extra_cleanup_paths=cleanup_paths)
@@ -273,6 +308,9 @@ class ReviewService:
             page_end=question.page_end,
             review_status=question.review_status,
             review_note=question.review_note,
+            created_by_user_id=question.created_by_user_id,
+            updated_by_user_id=question.updated_by_user_id,
+            deleted_by_user_id=question.deleted_by_user_id,
             answer=answer_payload,
             analysis=analysis_payload,
             knowledges=[link.knowledge_point for link in question.knowledges if link.knowledge_point],

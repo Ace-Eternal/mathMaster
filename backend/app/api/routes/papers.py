@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, File, Form, Query, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
@@ -18,6 +18,8 @@ from app.schemas.paper import (
 )
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest
 from app.services.llm.gateway import LLMGateway
+from app.models import AppUser
+from app.services.auth import request_meta, require_permission
 from app.services.mineu.service import MineuService
 from app.services.pipeline import MatchService, PaperPipelineService, SliceService
 from app.services.pipeline_queue import pipeline_task_queue
@@ -113,6 +115,7 @@ def manage_papers(
 
 @router.post("/upload", response_model=PaperResponse)
 async def upload_paper(
+    request: Request,
     paper_file: UploadFile = File(...),
     answer_file: UploadFile | None = File(default=None),
     title: str | None = Form(default=None),
@@ -121,6 +124,7 @@ async def upload_paper(
     grade_level: str | None = Form(default=None),
     term: str | None = Form(default=None),
     db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.upload")),
 ):
     service = get_pipeline_service(db)
     return await service.ingest_uploads(
@@ -131,19 +135,25 @@ async def upload_paper(
         region=region,
         grade_level=grade_level,
         term=term,
+        actor=user,
+        audit_meta=request_meta(request),
     )
 
 
 @router.post("/import-folders", response_model=ImportFoldersResponse)
 async def import_folders(
+    request: Request,
     paper_files: list[UploadFile] = File(...),
     answer_files: list[UploadFile] = File(default=[]),
     db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.upload")),
 ):
     service = get_pipeline_service(db)
     import_job, items = await service.import_folder_uploads(
         paper_files=paper_files,
         answer_files=answer_files,
+        actor=user,
+        audit_meta=request_meta(request),
     )
     return ImportFoldersResponse(
         import_job=ImportJobResponse(
@@ -170,7 +180,7 @@ def get_import_job(import_job_id: int, db: Session = Depends(get_db)):
 
 
 @router.post("/batch/run", response_model=list[PipelineRunResponse])
-def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
+def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("paper.run_pipeline"))):
     service = get_pipeline_service(db)
     responses = []
     for paper_id in payload.paper_ids:
@@ -184,58 +194,105 @@ def batch_run(payload: BatchRunRequest, db: Session = Depends(get_db)):
 
 
 @router.patch("/{paper_id}", response_model=PaperResponse)
-def update_paper(paper_id: int, payload: PaperUpdateRequest, db: Session = Depends(get_db)):
-    return get_pipeline_service(db).update_paper(paper_id, payload.model_dump(exclude_unset=True))
+def update_paper(
+    paper_id: int,
+    payload: PaperUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.edit")),
+):
+    return get_pipeline_service(db).update_paper(
+        paper_id,
+        payload.model_dump(exclude_unset=True),
+        actor=user,
+        audit_meta=request_meta(request),
+    )
 
 
 @router.post("/{paper_id}/questions", response_model=PaperResponse)
-def create_question(paper_id: int, payload: QuestionCreateRequest, db: Session = Depends(get_db)):
+def create_question(
+    paper_id: int,
+    payload: QuestionCreateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("question.create")),
+):
     service = ReviewService(db, get_storage_service())
-    service.create_question(paper_id, payload)
+    service.create_question(paper_id, payload, actor=user, audit_meta=request_meta(request))
     return get_pipeline_service(db).get_paper(paper_id)
 
 
 @router.patch("/{paper_id}/questions/{question_id}", response_model=PaperResponse)
-def patch_question(paper_id: int, question_id: int, payload: QuestionUpdateRequest, db: Session = Depends(get_db)):
+def patch_question(
+    paper_id: int,
+    question_id: int,
+    payload: QuestionUpdateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("question.edit")),
+):
     service = ReviewService(db, get_storage_service())
-    service.patch_question(paper_id, question_id, payload)
+    service.patch_question(paper_id, question_id, payload, actor=user, audit_meta=request_meta(request))
     return get_pipeline_service(db).get_paper(paper_id)
 
 
 @router.delete("/{paper_id}/questions/{question_id}", response_model=PaperResponse)
-def delete_question(paper_id: int, question_id: int, db: Session = Depends(get_db)):
+def delete_question(
+    paper_id: int,
+    question_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("question.delete")),
+):
     service = ReviewService(db, get_storage_service())
-    service.delete_question(paper_id, question_id)
+    service.delete_question(paper_id, question_id, actor=user, audit_meta=request_meta(request))
     return get_pipeline_service(db).get_paper(paper_id)
 
 
 @router.delete("/{paper_id}")
-def delete_paper(paper_id: int, db: Session = Depends(get_db)):
-    return get_pipeline_service(db).hard_delete_paper(paper_id)
+def delete_paper(
+    paper_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.delete")),
+):
+    return get_pipeline_service(db).hard_delete_paper(paper_id, actor=user, audit_meta=request_meta(request))
 
 
 @router.post("/{paper_id}/restore", response_model=PaperResponse)
-def restore_paper(paper_id: int, db: Session = Depends(get_db)):
-    return get_pipeline_service(db).restore_paper(paper_id)
+def restore_paper(
+    paper_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.edit")),
+):
+    return get_pipeline_service(db).restore_paper(paper_id, actor=user, audit_meta=request_meta(request))
 
 
 @router.post("/{paper_id}/answer/bind", response_model=PaperResponse)
 async def bind_answer(
     paper_id: int,
+    request: Request,
     answer_file: UploadFile = File(...),
     db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.edit")),
 ):
-    return await get_pipeline_service(db).bind_answer_upload(paper_id, answer_file)
+    return await get_pipeline_service(db).bind_answer_upload(paper_id, answer_file, actor=user, audit_meta=request_meta(request))
 
 
 @router.post("/{paper_id}/answer/unbind", response_model=PaperResponse)
-def unbind_answer(paper_id: int, db: Session = Depends(get_db)):
-    return get_pipeline_service(db).unbind_answer(paper_id)
+def unbind_answer(
+    paper_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: AppUser = Depends(require_permission("paper.edit")),
+):
+    return get_pipeline_service(db).unbind_answer(paper_id, actor=user, audit_meta=request_meta(request))
 
 
 @router.post("/{paper_id}/pipeline/run", response_model=PipelineRunResponse)
 @router.post("/{paper_id}/pipeline/run-all", response_model=PipelineRunResponse)
-def run_pipeline(paper_id: int, db: Session = Depends(get_db)):
+def run_pipeline(paper_id: int, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("paper.run_pipeline"))):
     paper = get_pipeline_service(db).get_paper(paper_id)
     task, _ = pipeline_task_queue.enqueue_pipeline(db, paper_id=paper.id, source="SINGLE")
     db.commit()

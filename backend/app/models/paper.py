@@ -2,14 +2,104 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.base import Base
 from app.models.mixins import TimestampMixin
 
 
-class ImportJob(TimestampMixin, Base):
+class ActorMixin:
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+
+
+class AppUser(TimestampMixin, Base):
+    __tablename__ = "app_user"
+    __table_args__ = (
+        Index("ix_app_user_username", "username", unique=True),
+        Index("ix_app_user_status", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    username: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    display_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), default="ACTIVE", nullable=False)
+    last_login_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class Role(TimestampMixin, Base):
+    __tablename__ = "role"
+    __table_args__ = (Index("ix_role_code", "code", unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text)
+
+
+class UserRole(Base):
+    __tablename__ = "user_role"
+    __table_args__ = (
+        UniqueConstraint("user_id", "role_id", name="uq_user_role_user_role"),
+        Index("ix_user_role_user_id", "user_id"),
+        Index("ix_user_role_role_id", "role_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id"), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class RolePermission(Base):
+    __tablename__ = "role_permission"
+    __table_args__ = (
+        UniqueConstraint("role_id", "permission", name="uq_role_permission_role_permission"),
+        Index("ix_role_permission_role_id", "role_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    role_id: Mapped[int] = mapped_column(ForeignKey("role.id"), nullable=False)
+    permission: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class UserPermission(Base):
+    __tablename__ = "user_permission"
+    __table_args__ = (
+        UniqueConstraint("user_id", "permission", name="uq_user_permission_user_permission"),
+        Index("ix_user_permission_user_id", "user_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    permission: Mapped[str] = mapped_column(String(128), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class AuditLog(Base):
+    __tablename__ = "audit_log"
+    __table_args__ = (
+        Index("ix_audit_log_actor_created", "actor_user_id", "created_at"),
+        Index("ix_audit_log_resource", "resource_type", "resource_id"),
+        Index("ix_audit_log_action", "action"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    action: Mapped[str] = mapped_column(String(128), nullable=False)
+    resource_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    resource_id: Mapped[str | None] = mapped_column(String(128))
+    before_summary_json: Mapped[str | None] = mapped_column(Text)
+    after_summary_json: Mapped[str | None] = mapped_column(Text)
+    ip_address: Mapped[str | None] = mapped_column(String(128))
+    user_agent: Mapped[str | None] = mapped_column(String(512))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+
+class ImportJob(ActorMixin, TimestampMixin, Base):
     __tablename__ = "import_job"
     __table_args__ = (
         Index("ix_import_job_status", "status"),
@@ -21,7 +111,7 @@ class ImportJob(TimestampMixin, Base):
     summary_json: Mapped[str] = mapped_column(Text, nullable=False)
 
 
-class PipelineTask(TimestampMixin, Base):
+class PipelineTask(ActorMixin, TimestampMixin, Base):
     __tablename__ = "pipeline_task"
     __table_args__ = (
         Index("ix_pipeline_task_status_queued_at", "status", "queued_at"),
@@ -70,6 +160,9 @@ class Paper(TimestampMixin, Base):
     status: Mapped[str] = mapped_column(String(32), default="RAW", nullable=False)
     is_deleted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     deleted_at: Mapped[datetime | None] = mapped_column(DateTime)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    deleted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
 
     answer_sheet: Mapped["AnswerSheet | None"] = relationship(back_populates="paper", uselist=False)
     conversion_jobs: Mapped[list["ConversionJob"]] = relationship(back_populates="paper")
@@ -77,7 +170,7 @@ class Paper(TimestampMixin, Base):
     reviews: Mapped[list["ReviewRecord"]] = relationship(back_populates="paper")
 
 
-class AnswerSheet(TimestampMixin, Base):
+class AnswerSheet(ActorMixin, TimestampMixin, Base):
     __tablename__ = "answer_sheet"
     __table_args__ = (Index("ix_answer_sheet_paper_id", "paper_id"),)
 
@@ -91,7 +184,7 @@ class AnswerSheet(TimestampMixin, Base):
     paper: Mapped["Paper"] = relationship(back_populates="answer_sheet")
 
 
-class ConversionJob(TimestampMixin, Base):
+class ConversionJob(ActorMixin, TimestampMixin, Base):
     __tablename__ = "conversion_job"
     __table_args__ = (
         Index("ix_conversion_job_paper_id_job_type", "paper_id", "job_type"),
@@ -131,6 +224,9 @@ class Question(TimestampMixin, Base):
     page_end: Mapped[int | None] = mapped_column(Integer)
     review_status: Mapped[str] = mapped_column(String(32), default="PENDING", nullable=False)
     review_note: Mapped[str | None] = mapped_column(Text)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    deleted_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
 
     paper: Mapped["Paper"] = relationship(back_populates="questions")
     answer: Mapped["QuestionAnswer | None"] = relationship(back_populates="question", uselist=False)
@@ -141,7 +237,7 @@ class Question(TimestampMixin, Base):
     chat_sessions: Mapped[list["ChatSession"]] = relationship(back_populates="question")
 
 
-class QuestionAnswer(TimestampMixin, Base):
+class QuestionAnswer(ActorMixin, TimestampMixin, Base):
     __tablename__ = "question_answer"
     __table_args__ = (Index("ix_question_answer_question_id", "question_id"),)
 
@@ -171,13 +267,14 @@ class ReviewRecord(Base):
     after_data_json: Mapped[str | None] = mapped_column(Text)
     comment: Mapped[str | None] = mapped_column(Text)
     reviewer_id: Mapped[str | None] = mapped_column(String(128))
+    actor_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     paper: Mapped["Paper"] = relationship(back_populates="reviews")
     question: Mapped["Question | None"] = relationship(back_populates="reviews")
 
 
-class KnowledgePoint(TimestampMixin, Base):
+class KnowledgePoint(ActorMixin, TimestampMixin, Base):
     __tablename__ = "knowledge_point"
     __table_args__ = (
         Index("ix_knowledge_point_name", "name"),
@@ -194,7 +291,7 @@ class KnowledgePoint(TimestampMixin, Base):
     question_links: Mapped[list["QuestionKnowledge"]] = relationship(back_populates="knowledge_point")
 
 
-class SolutionMethod(TimestampMixin, Base):
+class SolutionMethod(ActorMixin, TimestampMixin, Base):
     __tablename__ = "solution_method"
     __table_args__ = (Index("ix_solution_method_name", "name"),)
 
@@ -216,6 +313,8 @@ class QuestionKnowledge(Base):
     knowledge_point_id: Mapped[int] = mapped_column(ForeignKey("knowledge_point.id"), nullable=False)
     source_type: Mapped[str] = mapped_column(String(16), default="AUTO", nullable=False)
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     question: Mapped["Question"] = relationship(back_populates="knowledges")
@@ -234,13 +333,15 @@ class QuestionMethod(Base):
     solution_method_id: Mapped[int] = mapped_column(ForeignKey("solution_method.id"), nullable=False)
     source_type: Mapped[str] = mapped_column(String(16), default="AUTO", nullable=False)
     confidence: Mapped[float | None] = mapped_column(Numeric(5, 4))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     question: Mapped["Question"] = relationship(back_populates="methods")
     solution_method: Mapped["SolutionMethod"] = relationship(back_populates="question_links")
 
 
-class QuestionAnalysis(TimestampMixin, Base):
+class QuestionAnalysis(ActorMixin, TimestampMixin, Base):
     __tablename__ = "question_analysis"
     __table_args__ = (Index("ix_question_analysis_question_id", "question_id"),)
 
@@ -264,6 +365,8 @@ class ChatSession(TimestampMixin, Base):
     question_id: Mapped[int] = mapped_column(ForeignKey("question.id"), nullable=False)
     title: Mapped[str | None] = mapped_column(String(255))
     selected_model: Mapped[str | None] = mapped_column(String(128))
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
 
     question: Mapped["Question"] = relationship(back_populates="chat_sessions")
     messages: Mapped[list["ChatMessage"]] = relationship(back_populates="session")
@@ -279,12 +382,14 @@ class ChatMessage(Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     model_name: Mapped[str | None] = mapped_column(String(128))
     token_usage: Mapped[int | None] = mapped_column(Integer)
+    created_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
+    updated_by_user_id: Mapped[int | None] = mapped_column(ForeignKey("app_user.id"))
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
 
-class SolutionTemplate(TimestampMixin, Base):
+class SolutionTemplate(ActorMixin, TimestampMixin, Base):
     __tablename__ = "solution_template"
     __table_args__ = (Index("ix_solution_template_name", "name"),)
 
@@ -294,3 +399,21 @@ class SolutionTemplate(TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
     tags: Mapped[str | None] = mapped_column(String(512))
     template_md_path: Mapped[str | None] = mapped_column(String(1024))
+
+
+class UserQuestionState(TimestampMixin, Base):
+    __tablename__ = "user_question_state"
+    __table_args__ = (
+        UniqueConstraint("user_id", "question_id", name="uq_user_question_state_user_question"),
+        Index("ix_user_question_state_user_status", "user_id", "practice_status"),
+        Index("ix_user_question_state_user_favorite", "user_id", "is_favorited"),
+        Index("ix_user_question_state_question_id", "question_id"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("app_user.id"), nullable=False)
+    question_id: Mapped[int] = mapped_column(ForeignKey("question.id"), nullable=False)
+    practice_status: Mapped[str] = mapped_column(String(32), default="NOT_STARTED", nullable=False)
+    is_favorited: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    last_practiced_at: Mapped[datetime | None] = mapped_column(DateTime)
+    solved_at: Mapped[datetime | None] = mapped_column(DateTime)
