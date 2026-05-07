@@ -6,17 +6,13 @@ import AnswerVisibilityButton from '../components/AnswerVisibilityButton.vue'
 import DiceIcon from '../components/DiceIcon.vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 import PracticeStatusBadge from '../components/PracticeStatusBadge.vue'
+import QuestionChatPanel from '../components/QuestionChatPanel.vue'
 
 const loading = ref(false)
 const stateSaving = ref(false)
 const answerVisible = ref(false)
 const current = ref<any>(null)
 const dictionaryOptions = ref({ knowledgePoints: [] as any[], solutionMethods: [] as any[] })
-const chatMessage = ref('')
-const chatSession = ref<any>(null)
-const chatSending = ref(false)
-const chatModels = ref<any[]>([])
-const selectedModel = ref<string | null>(null)
 
 const filters = reactive({
   grade_levels: [] as string[],
@@ -46,21 +42,17 @@ const hasActiveFilters = computed(
 )
 
 const loadDictionary = async () => {
-  const [knowledgeResponse, methodResponse, modelResponse] = await Promise.all([
+  const [knowledgeResponse, methodResponse] = await Promise.all([
     api.get('/dictionary/knowledge-points'),
     api.get('/dictionary/solution-methods'),
-    api.get('/chat/models'),
   ])
   dictionaryOptions.value.knowledgePoints = knowledgeResponse.data
   dictionaryOptions.value.solutionMethods = methodResponse.data
-  chatModels.value = modelResponse.data || []
-  selectedModel.value = chatModels.value.find((item: any) => item.is_default)?.id || chatModels.value[0]?.id || null
 }
 
 const randomQuestion = async () => {
   loading.value = true
   answerVisible.value = false
-  chatSession.value = null
   try {
     const { data } = await api.get('/practice/random-question', {
       params: {
@@ -99,26 +91,6 @@ const changePracticeStatus = async (status: string) => {
 
 const toggleFavorite = async () => {
   await updateState({ is_favorited: !practiceState.value?.is_favorited })
-}
-
-const sendChat = async () => {
-  const content = chatMessage.value.trim()
-  if (!content || !question.value) return
-  chatSending.value = true
-  try {
-    const { data } = await api.post('/chat/sessions/message', {
-      session_id: chatSession.value?.id || null,
-      question_id: question.value.id,
-      content,
-      model_name: selectedModel.value,
-    })
-    chatSession.value = data
-    chatMessage.value = ''
-  } catch (error: any) {
-    ElMessage.error(error?.response?.data?.detail || '讲题对话失败。')
-  } finally {
-    chatSending.value = false
-  }
 }
 
 onMounted(async () => {
@@ -224,25 +196,7 @@ onMounted(async () => {
       <div v-else class="surface-note">答案已隐藏。</div>
     </section>
 
-    <section v-if="question" class="panel">
-      <div class="section-head">
-        <div>
-          <div class="section-title">讲题对话</div>
-          <div class="muted">围绕当前随机题继续追问，和题目详情页使用同一套大模型讲题接口。</div>
-        </div>
-        <el-select v-model="selectedModel" placeholder="模型" style="width: 220px">
-          <el-option v-for="item in chatModels" :key="item.id" :label="item.label" :value="item.id" />
-        </el-select>
-      </div>
-      <div v-if="chatSession?.messages?.length" class="chat-list">
-        <div v-for="item in chatSession.messages" :key="item.id" class="surface-note">
-          <strong>{{ item.role === 'user' ? '我' : '讲题助手' }}</strong>
-          <MarkdownContent :content="item.content" />
-        </div>
-      </div>
-      <el-input v-model="chatMessage" type="textarea" :rows="4" placeholder="例如：先讲思路，再讲关键步骤。" />
-      <el-button type="primary" :loading="chatSending" style="margin-top: 12px" @click="sendChat">发送消息</el-button>
-    </section>
+    <QuestionChatPanel v-if="question" :question-id="question.id" :question-no="question.question_no" />
 
     <section v-else class="panel">
       <div class="surface-note">点击随机图标开始；未选择范围时会从所有题目中随机抽题。</div>
@@ -343,9 +297,4 @@ onMounted(async () => {
   border-radius: 8px;
 }
 
-.chat-list {
-  display: grid;
-  gap: 12px;
-  margin-bottom: 12px;
-}
 </style>

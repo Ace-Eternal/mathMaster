@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.routes import chat as chat_routes
 from app.api.routes import papers as paper_routes
 from app.api.routes import templates as template_routes
 from app.api.routes import users as user_routes
@@ -114,6 +115,18 @@ def make_papers_api_client(session_factory):
 def make_users_api_client(session_factory):
     app = FastAPI()
     app.include_router(user_routes.router, prefix="/api/users")
+
+    def override_get_db():
+        with session_factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
+def make_chat_api_client(session_factory):
+    app = FastAPI()
+    app.include_router(chat_routes.router, prefix="/api/chat")
 
     def override_get_db():
         with session_factory() as db:
@@ -1758,6 +1771,109 @@ def test_chat_tutor_service_cancel_generation_preserves_partial_message(tmp_path
         assert messages[-1].content.endswith("> 已停止生成")
         assert "第一段。" in messages[-1].content
         assert chat_generation_registry.cancel(first_event["generation_id"]) == "already_finished"
+
+
+def test_chat_api_isolates_sessions_and_generation_cancel_by_user(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    with session_factory() as db:
+        user_a = AppUser(username="student-a", display_name="学生A", password_hash="x", status="ACTIVE")
+        user_b = AppUser(username="student-b", display_name="学生B", password_hash="x", status="ACTIVE")
+        db.add_all([user_a, user_b])
+        db.flush()
+        paper = Paper(title="隔离测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="1", stem_text="题干", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        session_a = ChatSession(question_id=question.id, user_id=str(user_a.id), title="A 的会话")
+        session_b = ChatSession(question_id=question.id, user_id=str(user_b.id), title="B 的会话")
+        db.add_all([session_a, session_b])
+        db.flush()
+        db.add_all(
+            [
+                ChatMessage(session_id=session_a.id, role="user", content="A 的问题"),
+                ChatMessage(session_id=session_b.id, role="user", content="B 的问题"),
+            ]
+        )
+        db.commit()
+        bootstrap_auth_data(db)
+        token_a = create_access_token(user_a)
+        token_b = create_access_token(user_b)
+        question_id = question.id
+        session_a_id = session_a.id
+        session_b_id = session_b.id
+        generation = chat_generation_registry.register(session_id=session_a_id, question_id=question_id, user_id=str(user_a.id))
+
+    client = make_chat_api_client(session_factory)
+    headers_a = {"Authorization": f"Bearer {token_a}"}
+    headers_b = {"Authorization": f"Bearer {token_b}"}
+
+    list_a = client.get(f"/api/chat/questions/{question_id}/sessions", headers=headers_a)
+    list_b = client.get(f"/api/chat/questions/{question_id}/sessions", headers=headers_b)
+    forbidden_get = client.get(f"/api/chat/sessions/{session_a_id}", params={"question_id": question_id}, headers=headers_b)
+    forbidden_send = client.post(
+        "/api/chat/sessions/message",
+        headers=headers_b,
+        json={"session_id": session_a_id, "question_id": question_id, "content": "越权继续追问"},
+    )
+    forbidden_delete = client.delete(f"/api/chat/sessions/{session_a_id}", params={"question_id": question_id}, headers=headers_b)
+    forbidden_cancel = client.post(f"/api/chat/generations/{generation.generation_id}/cancel", headers=headers_b)
+    allowed_cancel = client.post(f"/api/chat/generations/{generation.generation_id}/cancel", headers=headers_a)
+
+    assert list_a.status_code == 200
+    assert [item["id"] for item in list_a.json()] == [session_a_id]
+    assert list_b.status_code == 200
+    assert [item["id"] for item in list_b.json()] == [session_b_id]
+    assert forbidden_get.status_code == 404
+    assert forbidden_send.status_code == 404
+    assert forbidden_delete.status_code == 404
+    assert forbidden_cancel.status_code == 404
+    assert allowed_cancel.status_code == 200
+    assert allowed_cancel.json()["status"] == "cancelled"
+
+
+def test_chat_models_and_cancel_require_authenticated_chat_permission(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    client = make_chat_api_client(session_factory)
+
+    models_response = client.get("/api/chat/models")
+    cancel_response = client.post("/api/chat/generations/not-found/cancel")
+
+    assert models_response.status_code == 401
+    assert cancel_response.status_code == 401
+
+
+def test_profile_chat_sessions_only_returns_current_user_items():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        user_a = AppUser(username="student-a", display_name="学生A", password_hash="x", status="ACTIVE")
+        user_b = AppUser(username="student-b", display_name="学生B", password_hash="x", status="ACTIVE")
+        db.add_all([user_a, user_b])
+        db.flush()
+        paper = Paper(title="测试卷", paper_pdf_path="raw/paper.pdf", paper_pdf_hash="hash")
+        db.add(paper)
+        db.flush()
+        question = Question(paper_id=paper.id, question_no="6", stem_text="题干", review_status="APPROVED")
+        db.add(question)
+        db.flush()
+        session_a = ChatSession(question_id=question.id, user_id=str(user_a.id), title="A 的会话")
+        session_b = ChatSession(question_id=question.id, user_id=str(user_b.id), title="B 的会话")
+        db.add_all([session_a, session_b])
+        db.flush()
+        db.add_all(
+            [
+                ChatMessage(session_id=session_a.id, role="user", content="A 的问题"),
+                ChatMessage(session_id=session_b.id, role="user", content="B 的问题"),
+            ]
+        )
+        db.commit()
+
+        result = ProfileService(db).chat_sessions(user_a, page=1, page_size=20)
+
+        assert result.total == 1
+        assert [item["session_id"] for item in result.items] == [session_a.id]
 
 
 def test_chat_tutor_service_lists_sessions_with_latest_first():

@@ -125,7 +125,6 @@ class ChatMessageRequest(BaseModel):
     session_id: int | None = None
     question_id: int
     content: str
-    user_id: str | None = None
     model_name: str | None = None
 
 

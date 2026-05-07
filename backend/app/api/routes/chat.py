@@ -55,25 +55,31 @@ def get_session(session_id: int, question_id: int | None = None, db: Session = D
 
 @router.post("/sessions/message", response_model=ChatSessionResponse)
 def send_message(payload: ChatMessageRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
-    session = ChatTutorService(db, LLMGateway()).send(
-        question_id=payload.question_id,
-        content=payload.content,
-        user_id=str(user.id),
-        session_id=payload.session_id,
-        model_name=payload.model_name,
-    )
+    try:
+        session = ChatTutorService(db, LLMGateway()).send(
+            question_id=payload.question_id,
+            content=payload.content,
+            user_id=str(user.id),
+            session_id=payload.session_id,
+            model_name=payload.model_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     return ChatSessionResponse.model_validate(session)
 
 
 @router.post("/sessions/message/stream")
 def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
-    _, event_iter = ChatTutorService(db, LLMGateway()).stream_send(
-        question_id=payload.question_id,
-        content=payload.content,
-        user_id=str(user.id),
-        session_id=payload.session_id,
-        model_name=payload.model_name,
-    )
+    try:
+        _, event_iter = ChatTutorService(db, LLMGateway()).stream_send(
+            question_id=payload.question_id,
+            content=payload.content,
+            user_id=str(user.id),
+            session_id=payload.session_id,
+            model_name=payload.model_name,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
     def sse_iter():
         for event in event_iter:
@@ -83,16 +89,16 @@ def stream_message(payload: ChatMessageRequest, db: Session = Depends(get_db), u
 
 
 @router.post("/generations/{generation_id}/cancel")
-def cancel_generation(generation_id: str, db: Session = Depends(get_db)):
+def cancel_generation(generation_id: str, db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     service = ChatTutorService(db, LLMGateway())
     try:
-        return service.cancel_generation(generation_id)
+        return service.cancel_generation(generation_id, user_id=str(user.id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.get("/models", response_model=list[ChatModelOptionResponse])
-def list_chat_models(db: Session = Depends(get_db)):
+def list_chat_models(db: Session = Depends(get_db), user: AppUser = Depends(require_permission("chat.use"))):
     return ChatTutorService(db, LLMGateway()).list_chat_models()
 
 

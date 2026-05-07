@@ -78,6 +78,16 @@
 
 - 执行者：Codex
 - 数据库清理：硬删除除 `paper_id=28`、`paper_id=29` 之外的历史试卷记录 27 条。
+
+## 2026-05-07 - 讲题对话隔离与随机刷题复用验证
+
+- 执行者：Codex
+- 修复：题目详情页讲题面板抽成公共组件，随机刷题页复用同一套历史会话、流式输出、模型选择、停止生成、新对话和删除/清空历史能力。
+- 修复：讲题模型列表与停止生成接口增加 `chat.use` 权限；generation 注册当前用户，取消时校验归属。
+- 修复：跨用户继续发送他人会话时返回 404，不再暴露为服务端错误。
+- 后端测试：`cd backend; uv run --python 3.12.12 pytest`，69 passed。
+- 前端构建：`cd frontend; npm run build`，通过；保留既有 Vite 大 chunk 警告。
+- 环境说明：`uv run pytest` 因本机未找到项目声明的 Python 3.12.13 未启动测试，已使用本机可用的 Python 3.12.12 完整验证。
 - 文件清理：通过项目硬删除服务删除历史试卷关联文件 320 个；额外删除孤儿 PDF 2 个，合计额外释放 2,629,744 bytes。
 - 数据库压缩：执行 `PRAGMA wal_checkpoint(TRUNCATE)` 与 `VACUUM`，`mathmaster.db` 从 503,808 bytes 降到 299,008 bytes，WAL 清空为 0 bytes。
 - 复核：`/api/papers/manage` 返回 2 条：`数学卷-2506丽水高一期末` 与 `数学卷-2506宁波三峰高一期末`。

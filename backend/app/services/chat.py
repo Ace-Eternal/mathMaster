@@ -23,6 +23,7 @@ class ChatGenerationState:
     generation_id: str
     session_id: int
     question_id: int
+    user_id: str | None
     started_at: datetime
     cancelled: bool = False
     finished_at: datetime | None = None
@@ -34,21 +35,24 @@ class ChatGenerationRegistry:
         self._lock = threading.Lock()
         self._states: dict[str, ChatGenerationState] = {}
 
-    def register(self, *, session_id: int, question_id: int) -> ChatGenerationState:
+    def register(self, *, session_id: int, question_id: int, user_id: str | None) -> ChatGenerationState:
         state = ChatGenerationState(
             generation_id=uuid.uuid4().hex,
             session_id=session_id,
             question_id=question_id,
+            user_id=user_id,
             started_at=datetime.now(UTC),
         )
         with self._lock:
             self._states[state.generation_id] = state
         return state
 
-    def cancel(self, generation_id: str) -> str | None:
+    def cancel(self, generation_id: str, *, user_id: str | None = None) -> str | None:
         with self._lock:
             state = self._states.get(generation_id)
             if state is None:
+                return None
+            if user_id is not None and state.user_id != user_id:
                 return None
             if state.finished_at is not None:
                 return "already_finished"
@@ -146,7 +150,7 @@ class ChatTutorService:
         self._append_user_message(session=session, content=content)
         self.db.commit()
         session = self._load_session(session.id)
-        generation = chat_generation_registry.register(session_id=session.id, question_id=question.id)
+        generation = chat_generation_registry.register(session_id=session.id, question_id=question.id, user_id=user_id)
         history = [{"role": message.role, "content": message.content} for message in session.messages]
         multimodal_context = self._build_multimodal_context(
             question=question,
@@ -218,8 +222,8 @@ class ChatTutorService:
 
         return session.id, event_iter()
 
-    def cancel_generation(self, generation_id: str) -> dict[str, Any]:
-        status = chat_generation_registry.cancel(generation_id)
+    def cancel_generation(self, generation_id: str, *, user_id: str | None = None) -> dict[str, Any]:
+        status = chat_generation_registry.cancel(generation_id, user_id=user_id)
         if status is None:
             raise ValueError("Generation not found")
         return {"ok": True, "generation_id": generation_id, "status": status}
