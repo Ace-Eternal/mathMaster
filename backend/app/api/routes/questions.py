@@ -174,7 +174,12 @@ def _extract_images_from_document(
 
 
 @router.get("/{question_id}", response_model=QuestionDetailResponse)
-def get_question(question_id: int, request: Request, db: Session = Depends(get_db)):
+def get_question(
+    question_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("question.read")),
+):
     ReviewService(db, get_storage_service()).maintain_review_state(question_id=question_id)
     question = db.execute(
         select(Question)

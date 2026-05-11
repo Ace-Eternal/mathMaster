@@ -20,13 +20,16 @@ from app.schemas.auth import UserResponse
 
 ALL_PERMISSIONS = [
     "profile.read",
+    "paper.read",
     "paper.upload",
     "paper.edit",
     "paper.delete",
     "paper.run_pipeline",
+    "question.read",
     "question.create",
     "question.edit",
     "question.delete",
+    "task.read",
     "review.submit",
     "dictionary.manage",
     "template.manage",
@@ -45,13 +48,16 @@ ROLE_TEMPLATES: dict[str, dict[str, object]] = {
     "STUDENT": {
         "name": "学生",
         "description": "用于刷题、收藏、讲题对话和个人中心。",
-        "permissions": ["profile.read", "practice.use", "chat.use"],
+        "permissions": ["profile.read", "paper.read", "question.read", "practice.use", "chat.use"],
     },
     "TEACHER": {
         "name": "教师",
         "description": "可上传试卷、审核、编辑题目并运行分析。",
         "permissions": [
             "profile.read",
+            "paper.read",
+            "question.read",
+            "task.read",
             "practice.use",
             "chat.use",
             "paper.upload",
@@ -68,6 +74,9 @@ ROLE_TEMPLATES: dict[str, dict[str, object]] = {
         "description": "可管理题库内容、字典和模板，但不是超级管理员。",
         "permissions": [
             "profile.read",
+            "paper.read",
+            "question.read",
+            "task.read",
             "practice.use",
             "chat.use",
             "paper.upload",
@@ -91,6 +100,8 @@ PERMISSION_GROUPS = [
         "name": "学习对话",
         "permissions": [
             {"code": "profile.read", "name": "查看个人中心"},
+            {"code": "paper.read", "name": "查看试卷列表"},
+            {"code": "question.read", "name": "查看题目与答案"},
             {"code": "practice.use", "name": "随机刷题与收藏"},
             {"code": "chat.use", "name": "讲题对话"},
         ],
@@ -103,6 +114,7 @@ PERMISSION_GROUPS = [
             {"code": "paper.edit", "name": "编辑试卷与答案"},
             {"code": "paper.delete", "name": "删除试卷"},
             {"code": "paper.run_pipeline", "name": "运行试卷流程"},
+            {"code": "task.read", "name": "查看处理任务"},
         ],
     },
     {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { api } from '../api/client'
+import { api, getAccessToken } from '../api/client'
 import AnswerVisibilityButton from '../components/AnswerVisibilityButton.vue'
 import MarkdownContent from '../components/MarkdownContent.vue'
 
@@ -335,7 +335,10 @@ const sendMessage = async () => {
   try {
     const response = await fetch(`${apiBase}/chat/sessions/message/stream`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${getAccessToken()}`,
+      },
       body: JSON.stringify({
         session_id: session.value?.id,
         question_id: Number(props.id),

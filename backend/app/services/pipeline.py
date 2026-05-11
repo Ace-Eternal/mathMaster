@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, selectinload
 
+from app.core.config import settings
 from app.models import (
     AnswerSheet,
     ChatMessage,
@@ -78,6 +79,34 @@ def question_no_sort_key(question_no: str | None) -> tuple[int, tuple[object, ..
 class UploadedAsset:
     filename: str
     content: bytes
+
+
+async def read_pdf_upload(file: UploadFile, *, fallback_filename: str) -> UploadedAsset:
+    filename = file.filename or fallback_filename
+    extension = Path(filename).suffix.lower()
+    if extension != ".pdf":
+        raise HTTPException(status_code=415, detail="仅支持上传 PDF 文件")
+    if file.content_type and file.content_type not in {"application/pdf", "application/octet-stream"}:
+        raise HTTPException(status_code=415, detail="仅支持上传 PDF 文件")
+
+    max_bytes = settings.upload_max_file_size_mb * 1024 * 1024
+    chunks: list[bytes] = []
+    total_size = 0
+    while True:
+        chunk = await file.read(1024 * 1024)
+        if not chunk:
+            break
+        total_size += len(chunk)
+        if total_size > max_bytes:
+            raise HTTPException(status_code=413, detail=f"单个文件不能超过 {settings.upload_max_file_size_mb}MB")
+        chunks.append(chunk)
+
+    content = b"".join(chunks)
+    if not content:
+        raise HTTPException(status_code=422, detail="上传文件不能为空")
+    if not content.startswith(b"%PDF"):
+        raise HTTPException(status_code=415, detail="文件内容不是有效的 PDF")
+    return UploadedAsset(filename=filename, content=content)
 
 
 @dataclass
@@ -1173,10 +1202,10 @@ class PaperPipelineService:
         actor: AppUser | None = None,
         audit_meta: dict[str, str | None] | None = None,
     ) -> Paper:
-        paper_asset = UploadedAsset(filename=paper_file.filename or "paper.pdf", content=await paper_file.read())
+        paper_asset = await read_pdf_upload(paper_file, fallback_filename="paper.pdf")
         answer_asset = None
         if answer_file is not None:
-            answer_asset = UploadedAsset(filename=answer_file.filename or "answer.pdf", content=await answer_file.read())
+            answer_asset = await read_pdf_upload(answer_file, fallback_filename="answer.pdf")
         return self._create_paper_record(
             paper_asset=paper_asset,
             answer_asset=answer_asset,
@@ -1197,8 +1226,11 @@ class PaperPipelineService:
         actor: AppUser | None = None,
         audit_meta: dict[str, str | None] | None = None,
     ) -> tuple[ImportJob, list[dict[str, Any]]]:
-        paper_assets = [UploadedAsset(filename=item.filename or "paper.pdf", content=await item.read()) for item in paper_files]
-        answer_assets = [UploadedAsset(filename=item.filename or "answer.pdf", content=await item.read()) for item in answer_files]
+        total_files = len(paper_files) + len(answer_files)
+        if total_files > settings.upload_max_batch_files:
+            raise HTTPException(status_code=413, detail=f"批量导入最多支持 {settings.upload_max_batch_files} 个文件")
+        paper_assets = [await read_pdf_upload(item, fallback_filename="paper.pdf") for item in paper_files]
+        answer_assets = [await read_pdf_upload(item, fallback_filename="answer.pdf") for item in answer_files]
         paired = self._pair_assets(paper_assets, answer_assets)
         imported_items: list[dict[str, Any]] = []
 
@@ -1350,7 +1382,7 @@ class PaperPipelineService:
 
     async def bind_answer_upload(self, paper_id: int, answer_file: UploadFile, *, actor: AppUser | None = None, audit_meta: dict[str, str | None] | None = None) -> Paper:
         paper = self.get_paper(paper_id)
-        answer_asset = UploadedAsset(filename=answer_file.filename or "answer.pdf", content=await answer_file.read())
+        answer_asset = await read_pdf_upload(answer_file, fallback_filename="answer.pdf")
         answer_path = build_storage_key("raw", "unpaired", "answer", filename=random_prefixed_name(answer_asset.filename))
         self.storage.save_file(answer_asset.content, answer_path)
 

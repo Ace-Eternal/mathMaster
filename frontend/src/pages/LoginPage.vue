@@ -8,8 +8,8 @@ const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(false)
 const form = reactive({
-  username: 'admin',
-  password: 'admin123',
+  username: '',
+  password: '',
 })
 
 const submit = async () => {
@@ -34,7 +34,7 @@ const submit = async () => {
   <div class="login-page">
     <section class="panel login-panel">
       <div class="page-title">MathMaster</div>
-      <p class="page-subtitle">使用本地账号登录。当前版本所有账号默认拥有超级管理员权限，操作会记录到用户审计日志。</p>
+      <p class="page-subtitle">使用账号登录，操作会记录到用户审计日志。</p>
       <el-form label-position="top" @submit.prevent="submit">
         <el-form-item label="账号">
           <el-input v-model="form.username" autocomplete="username" @keyup.enter="submit" />

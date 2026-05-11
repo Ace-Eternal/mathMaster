@@ -4,12 +4,13 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException, UploadFile
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.api.routes import admin_llm as admin_llm_routes
+from app.api.routes import files as files_routes
 from app.api.routes import papers as paper_routes
 from app.api.routes import templates as template_routes
 from app.api.routes import users as user_routes
@@ -23,7 +24,7 @@ from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
 from app.services.llm.gateway import LLMGateway
 from app.services.mineu.service import MineuService
-from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key
+from app.services.pipeline import AnswerBoundaryItem, AnswerSliceDraft, BoundaryItem, MatchService, PaperPipelineService, SliceService, normalize_pair_key, read_pdf_upload
 from app.services import pipeline_queue as pipeline_queue_module
 from app.services.pipeline_queue import PipelineTaskQueue
 from app.services.pipeline_queue import TASK_TYPE_MINEU_CONVERT, TASK_TYPE_SLICE_MATCH
@@ -137,6 +138,18 @@ def make_admin_llm_api_client(session_factory):
     return TestClient(app)
 
 
+def make_files_api_client(session_factory):
+    app = FastAPI()
+    app.include_router(files_routes.router, prefix="/api/files")
+
+    def override_get_db():
+        with session_factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
 def test_pipeline_task_queue_enqueue_creates_queued_task(tmp_path):
     session_factory = make_pipeline_queue_session(tmp_path)
     queue = PipelineTaskQueue()
@@ -182,7 +195,7 @@ def test_auth_bootstrap_assigns_student_to_existing_users_and_merges_direct_perm
 
         assert roles == ["STUDENT"]
         assert "SUPER_ADMIN" not in roles
-        assert {"profile.read", "practice.use", "chat.use", "paper.upload"}.issubset(set(permissions))
+        assert {"profile.read", "paper.read", "question.read", "practice.use", "chat.use", "paper.upload"}.issubset(set(permissions))
         assert "paper.delete" not in permissions
 
 
@@ -436,12 +449,52 @@ def test_pipeline_tasks_api_returns_queue_positions(tmp_path, monkeypatch):
         db.commit()
 
     client = make_papers_api_client(session_factory)
-    response = client.get("/api/papers/pipeline-tasks")
+    response = client.get("/api/papers/pipeline-tasks", headers=auth_headers(session_factory))
 
     assert response.status_code == 200
     payload = response.json()
     assert [item["status"] for item in payload] == ["RUNNING", "QUEUED", "QUEUED"]
     assert [item["queue_position"] for item in payload] == [None, 1, 2]
+
+
+def test_local_storage_rejects_path_traversal(tmp_path):
+    storage = LocalFileStorageService(str(tmp_path / "storage"))
+
+    with pytest.raises(ValueError):
+        storage.exists("../.env")
+    with pytest.raises(ValueError):
+        storage.save_file(b"bad", "mineu/1/images/../../escape.txt")
+
+
+def test_file_api_requires_auth_and_rejects_traversal(tmp_path, monkeypatch):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    storage = LocalFileStorageService(str(tmp_path / "storage"))
+    storage.save_file(b"%PDF-1.7\n", "slices/1/question.pdf")
+    monkeypatch.setattr(files_routes, "get_storage_service", lambda: storage)
+
+    client = make_files_api_client(session_factory)
+
+    unauthenticated = client.get("/api/files/slices/1/question.pdf")
+    blocked_database = client.get("/api/files/mathmaster.db", headers=auth_headers(session_factory))
+    allowed = client.get("/api/files/slices/1/question.pdf", headers=auth_headers(session_factory))
+
+    assert unauthenticated.status_code == 401
+    assert blocked_database.status_code == 404
+    assert allowed.status_code == 200
+
+
+def test_read_pdf_upload_rejects_non_pdf_content():
+    upload = UploadFile(filename="paper.pdf", file=io.BytesIO(b"not a pdf"), headers={"content-type": "application/pdf"})
+
+    async def run_check():
+        await read_pdf_upload(upload, fallback_filename="paper.pdf")
+
+    with pytest.raises(HTTPException) as exc_info:
+        import anyio
+
+        anyio.run(run_check)
+
+    assert exc_info.value.status_code == 415
 
 
 def test_hard_delete_paper_removes_records_and_storage_assets(tmp_path):
@@ -1347,11 +1400,14 @@ def test_llm_gateway_only_uses_mock_when_explicitly_enabled():
     original_use_mock = settings.llm_use_mock
     original_base_url = settings.llm_base_url
     original_api_key = settings.llm_api_key
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    db = Session(engine)
     try:
         settings.llm_use_mock = False
         settings.llm_base_url = None
         settings.llm_api_key = None
-        gateway = LLMGateway()
+        gateway = LLMGateway(db=db)
         assert gateway.use_mock is False
         try:
             gateway.structured_output(scenario="analysis", payload={"stem_text": "题干"})
@@ -1363,6 +1419,7 @@ def test_llm_gateway_only_uses_mock_when_explicitly_enabled():
         settings.llm_use_mock = original_use_mock
         settings.llm_base_url = original_base_url
         settings.llm_api_key = original_api_key
+        db.close()
 
 
 def test_review_service_build_question_detail_response_handles_analysis_links(tmp_path):

@@ -85,7 +85,7 @@ def build_pipeline_response(paper, task=None) -> PipelineRunResponse:
 
 
 @router.get("", response_model=list[PaperResponse])
-def list_papers(db: Session = Depends(get_db)):
+def list_papers(db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("paper.read"))):
     return get_pipeline_service(db).list_papers()
 
 
@@ -100,6 +100,7 @@ def manage_papers(
     has_answer: bool | None = None,
     include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("paper.edit")),
 ):
     return get_pipeline_service(db).list_manage_papers(
         keyword=keyword,
@@ -168,7 +169,7 @@ async def import_folders(
 
 
 @router.get("/import-jobs/{import_job_id}", response_model=ImportJobResponse)
-def get_import_job(import_job_id: int, db: Session = Depends(get_db)):
+def get_import_job(import_job_id: int, db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("task.read"))):
     import_job = get_pipeline_service(db).get_import_job(import_job_id)
     return ImportJobResponse(
         id=import_job.id,
@@ -302,17 +303,17 @@ def run_pipeline(paper_id: int, db: Session = Depends(get_db), user: AppUser = D
 
 
 @router.get("/pipeline-tasks", response_model=list[PipelineTaskResponse])
-def list_pipeline_tasks(db: Session = Depends(get_db)):
+def list_pipeline_tasks(db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("task.read"))):
     return build_task_responses(pipeline_task_queue.list_visible_tasks(db))
 
 
 @router.get("/{paper_id}", response_model=PaperResponse)
-def get_paper(paper_id: int, db: Session = Depends(get_db)):
+def get_paper(paper_id: int, db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("paper.read"))):
     return get_pipeline_service(db).get_paper(paper_id)
 
 
 @router.get("/{paper_id}/mineu-preview", response_model=MineuPreviewResponse)
-def get_mineu_preview(paper_id: int, db: Session = Depends(get_db)):
+def get_mineu_preview(paper_id: int, db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("task.read"))):
     paper = get_pipeline_service(db).get_paper(paper_id)
     storage = get_storage_service()
     outputs = {}

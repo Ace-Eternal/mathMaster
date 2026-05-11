@@ -272,3 +272,10 @@
 - 后端验证：`cd backend; uv run pytest -q` 通过，`68 passed, 22 warnings in 12.13s`。
 - 前端验证：`cd frontend; npm run build` 通过，`vue-tsc --noEmit && vite build` 成功。
 - 备注：warnings 为既有 `datetime.utcnow()` 弃用提示、npm 用户配置提示、Vite 大 chunk 警告和 npm 新版本提示；均不阻塞本次功能。
+## 2026-05-11 安全修复验证（Codex）
+
+- 后端验证：在 `backend/` 执行 `uv run pytest`，结果 `71 passed, 28 warnings in 9.33s`。
+- 前端验证：在 `frontend/` 执行 `npm run build`，结果通过；保留 Vite 大 chunk 体积提示。
+- 依赖安全验证：在 `frontend/` 执行 `npm audit --audit-level=moderate` 初次发现 axios/follow-redirects/postcss 漏洞；执行 `npm audit fix` 后复验，结果 `found 0 vulnerabilities`。
+- 修复覆盖：文件预览鉴权与白名单、存储路径 containment、生产默认凭据 fail-fast、业务读接口服务端鉴权、上传 PDF 大小/类型/魔数校验、MineU ZIP 资产名规范化、前端内存 token、Markdown DOMPurify、流式聊天 Authorization。
+- 本地秘密处理：已清空本机 `.env` 中的 `MINEU_API_KEY` 与 `LLM_API_KEY` 值；上线前必须在服务器秘密配置中注入轮换后的新 key，并设置强 `AUTH_SECRET_KEY` 与非默认管理员密码。

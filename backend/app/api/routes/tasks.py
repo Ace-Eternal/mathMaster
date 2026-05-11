@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import AppUser
 from app.schemas.paper import PipelineTaskResponse
+from app.services.auth import require_permission
 from app.services.pipeline_queue import pipeline_task_queue
 
 router = APIRouter()
@@ -37,6 +39,7 @@ def list_tasks(
     task_type: str | None = None,
     status: str | None = None,
     db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("task.read")),
 ):
     tasks = pipeline_task_queue.list_visible_tasks(
         db,
