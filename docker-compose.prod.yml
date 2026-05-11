@@ -18,9 +18,7 @@ services:
       retries: 20
 
   backend:
-    build:
-      context: .
-      dockerfile: backend/Dockerfile.prod
+    image: ${BACKEND_IMAGE:-ghcr.io/ace-eternal/mathmaster-backend}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     environment:
       APP_ENV: production
@@ -36,23 +34,21 @@ services:
       BOOTSTRAP_ADMIN_USERNAME: ${BOOTSTRAP_ADMIN_USERNAME:-admin}
       BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD}
       BOOTSTRAP_ADMIN_DISPLAY_NAME: ${BOOTSTRAP_ADMIN_DISPLAY_NAME:-超级管理员}
+      MINEU_BASE_URL: ${MINEU_BASE_URL:-}
+      MINEU_API_KEY: ${MINEU_API_KEY:-}
       MINEU_USE_MOCK: ${MINEU_USE_MOCK:-true}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_USE_MOCK: ${LLM_USE_MOCK:-true}
       CORS_ORIGINS: ${CORS_ORIGINS}
     volumes:
       - ./data:/data
-    ports:
-      - "8000:8000"
     depends_on:
       mysql:
         condition: service_healthy
 
   frontend:
-    build:
-      context: .
-      dockerfile: frontend/Dockerfile.prod
-      args:
-        VITE_API_BASE_URL: /api
+    image: ${FRONTEND_IMAGE:-ghcr.io/ace-eternal/mathmaster-frontend}:${IMAGE_TAG:-latest}
     restart: unless-stopped
     ports:
       - "80:80"

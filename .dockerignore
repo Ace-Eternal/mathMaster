@@ -1,0 +1,14 @@
+.env
+.git
+.github
+.codex
+data
+logs
+backend/.venv
+backend/__pycache__
+backend/.pytest_cache
+backend/*.egg-info
+frontend/node_modules
+frontend/dist
+*.pyc
+get-pip.py

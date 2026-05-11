@@ -279,3 +279,10 @@
 - 依赖安全验证：在 `frontend/` 执行 `npm audit --audit-level=moderate` 初次发现 axios/follow-redirects/postcss 漏洞；执行 `npm audit fix` 后复验，结果 `found 0 vulnerabilities`。
 - 修复覆盖：文件预览鉴权与白名单、存储路径 containment、生产默认凭据 fail-fast、业务读接口服务端鉴权、上传 PDF 大小/类型/魔数校验、MineU ZIP 资产名规范化、前端内存 token、Markdown DOMPurify、流式聊天 Authorization。
 - 本地秘密处理：已清空本机 `.env` 中的 `MINEU_API_KEY` 与 `LLM_API_KEY` 值；上线前必须在服务器秘密配置中注入轮换后的新 key，并设置强 `AUTH_SECRET_KEY` 与非默认管理员密码。
+
+## 2026-05-11 镜像仓库部署配置验证（Codex）
+
+- 配置调整：`docker-compose.prod.yml` 改为拉取 `ghcr.io/ace-eternal/mathmaster-backend` 与 `ghcr.io/ace-eternal/mathmaster-frontend` 镜像；新增 `.github/workflows/docker-images.yml` 用 GitHub Actions 构建并推送 GHCR 镜像；新增 `.dockerignore` 排除密钥、数据、日志和依赖目录。
+- 静态验证：执行 `git diff --check`，结果通过。
+- YAML 基础检查：确认 `docker-compose.prod.yml` 与 `.github/workflows/docker-images.yml` 无 tab 缩进和行尾空白。
+- 未执行项：本机未安装 Docker CLI，无法执行 `docker compose -f docker-compose.prod.yml config` 或本地镜像构建；需在服务器或 GitHub Actions 中完成实际拉取/构建验证。
