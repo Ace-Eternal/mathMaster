@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import DOMPurify from 'dompurify'
 import MarkdownIt from 'markdown-it'
 import texmath from 'markdown-it-texmath'
 import katex from 'katex'
@@ -42,7 +43,9 @@ const renderedHtml = computed(() => {
   if (!content) {
     return ''
   }
-  return markdown.render(normalizeMathContent(content))
+  return DOMPurify.sanitize(markdown.render(normalizeMathContent(content)), {
+    ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto):|[^a-z]|[a-z+.-]+(?:[^a-z+.-:]|$))/i,
+  })
 })
 </script>
 

@@ -31,6 +31,7 @@ def review_queue(
     has_answer: bool | None = None,
     include_deleted: bool = Query(default=False),
     db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("question.read")),
 ):
     return ReviewService(db, get_storage_service()).review_queue(
         paper_id=paper_id,

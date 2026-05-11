@@ -26,7 +26,7 @@ def _save_template_file(template: SolutionTemplate) -> str:
 
 
 @router.get("", response_model=list[SolutionTemplateResponse])
-def list_templates(keyword: str | None = None, db: Session = Depends(get_db)):
+def list_templates(keyword: str | None = None, db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("question.read"))):
     stmt = select(SolutionTemplate).order_by(SolutionTemplate.updated_at.desc())
     normalized_keyword = (keyword or "").strip()
     if normalized_keyword:
@@ -42,7 +42,7 @@ def list_templates(keyword: str | None = None, db: Session = Depends(get_db)):
 
 
 @router.get("/{template_id}", response_model=SolutionTemplateResponse)
-def get_template(template_id: int, db: Session = Depends(get_db)):
+def get_template(template_id: int, db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("question.read"))):
     template = db.get(SolutionTemplate, template_id)
     if template is None:
         raise HTTPException(status_code=404, detail="Template not found")

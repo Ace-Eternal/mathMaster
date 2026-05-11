@@ -2,7 +2,9 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.models import AppUser
 from app.schemas.search import SearchResponse
+from app.services.auth import require_permission
 from app.services.search import SearchService
 
 router = APIRouter()
@@ -16,6 +18,7 @@ def search_papers(
     grade_level: str | None = None,
     term: str | None = None,
     db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("paper.read")),
 ):
     return SearchService(db).search_papers(keyword, year, region, grade_level, term)
 
@@ -37,6 +40,7 @@ def search_questions(
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=20, ge=1, le=100),
     db: Session = Depends(get_db),
+    _user: AppUser = Depends(require_permission("question.read")),
 ):
     return SearchService(db).search_questions(
         keyword=keyword,

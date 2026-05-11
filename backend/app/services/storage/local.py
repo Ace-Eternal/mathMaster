@@ -11,8 +11,16 @@ class LocalFileStorageService(FileStorageService):
         self.base_dir.mkdir(parents=True, exist_ok=True)
 
     def _resolve(self, target_key: str) -> Path:
-        safe_key = target_key.replace("\\", "/").lstrip("/")
-        return self.base_dir / safe_key
+        normalized_key = target_key.replace("\\", "/").strip()
+        if not normalized_key or normalized_key.startswith("/"):
+            raise ValueError("Invalid storage key")
+        parts = [part for part in normalized_key.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError("Invalid storage key")
+        resolved_path = (self.base_dir / Path(*parts)).resolve()
+        if not resolved_path.is_relative_to(self.base_dir):
+            raise ValueError("Storage key escapes base directory")
+        return resolved_path
 
     def save_file(self, file_bytes: bytes, target_key: str) -> str:
         path = self._resolve(target_key)

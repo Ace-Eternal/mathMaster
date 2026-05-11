@@ -19,7 +19,7 @@ router = APIRouter()
 
 
 @router.get("/knowledge-points", response_model=list[KnowledgePointResponse])
-def list_knowledge_points(db: Session = Depends(get_db)):
+def list_knowledge_points(db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("question.read"))):
     return list(db.execute(select(KnowledgePoint).order_by(KnowledgePoint.level, KnowledgePoint.sort_no)).scalars())
 
 
@@ -79,7 +79,7 @@ def delete_knowledge_point(
 
 
 @router.get("/solution-methods", response_model=list[SolutionMethodResponse])
-def list_solution_methods(db: Session = Depends(get_db)):
+def list_solution_methods(db: Session = Depends(get_db), _user: AppUser = Depends(require_permission("question.read"))):
     return list(db.execute(select(SolutionMethod).order_by(SolutionMethod.name)).scalars())
 
 

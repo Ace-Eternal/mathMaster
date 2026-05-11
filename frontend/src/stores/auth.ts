@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { api } from '../api/client'
+import { api, setAccessToken } from '../api/client'
 
 type UserProfile = {
   id: number
@@ -10,11 +10,9 @@ type UserProfile = {
   permissions: string[]
 }
 
-const TOKEN_KEY = 'mm:auth-token'
-
 export const useAuthStore = defineStore('auth', {
   state: () => ({
-    token: localStorage.getItem(TOKEN_KEY) || '',
+    token: '',
     user: null as UserProfile | null,
     initialized: false,
   }),
@@ -27,8 +25,7 @@ export const useAuthStore = defineStore('auth', {
   actions: {
     setToken(token: string) {
       this.token = token
-      if (token) localStorage.setItem(TOKEN_KEY, token)
-      else localStorage.removeItem(TOKEN_KEY)
+      setAccessToken(token)
     },
     async login(username: string, password: string) {
       const { data } = await api.post('/auth/login', { username, password })

@@ -5,6 +5,7 @@ import json
 import time
 import uuid
 import zipfile
+from pathlib import PurePosixPath
 from typing import Any
 
 import httpx
@@ -156,13 +157,19 @@ class MineuService:
         lower_name = normalized.lower()
         if "/images/" in lower_name:
             image_offset = lower_name.index("/images/") + 1
-            return normalized[image_offset:]
-        if lower_name.startswith("images/"):
-            return normalized
-        filename = normalized.rsplit("/", 1)[-1].strip()
+            candidate = normalized[image_offset:]
+        elif lower_name.startswith("images/"):
+            candidate = normalized
+        else:
+            filename = normalized.rsplit("/", 1)[-1].strip()
+            candidate = f"images/{filename}" if filename else ""
+        candidate_path = PurePosixPath(candidate)
+        if candidate_path.is_absolute() or any(part in {"", ".", ".."} for part in candidate_path.parts):
+            return None
+        filename = candidate_path.name.strip()
         if not filename:
             return None
-        return f"images/{filename}"
+        return str(PurePosixPath("images") / filename)
 
     @staticmethod
     def _mock_convert(*, filename: str, job_type: str) -> dict[str, bytes]:

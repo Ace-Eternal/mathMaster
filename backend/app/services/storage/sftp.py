@@ -40,8 +40,17 @@ class SFTPFileStorageService(FileStorageService):
             transport.close()
 
     def _full_path(self, target_key: str) -> str:
-        safe_key = target_key.replace("\\", "/").lstrip("/")
-        return posixpath.join(self.base_dir, safe_key)
+        normalized_key = target_key.replace("\\", "/").strip()
+        if not normalized_key or normalized_key.startswith("/"):
+            raise ValueError("Invalid storage key")
+        parts = [part for part in normalized_key.split("/") if part]
+        if any(part in {".", ".."} for part in parts):
+            raise ValueError("Invalid storage key")
+        full_path = posixpath.normpath(posixpath.join(self.base_dir, *parts))
+        base_path = posixpath.normpath(self.base_dir)
+        if full_path != base_path and not full_path.startswith(f"{base_path}/"):
+            raise ValueError("Storage key escapes base directory")
+        return full_path
 
     def _mkdir_recursive(self, sftp: paramiko.SFTPClient, remote_dir: str) -> None:
         current = PurePosixPath("/")

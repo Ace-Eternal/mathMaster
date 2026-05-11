@@ -68,6 +68,18 @@ class Settings(BaseSettings):
     bootstrap_admin_username: str = "admin"
     bootstrap_admin_password: str = "admin123"
     bootstrap_admin_display_name: str = "超级管理员"
+    upload_max_file_size_mb: int = 50
+    upload_max_batch_files: int = 40
+
+    def model_post_init(self, __context: object) -> None:
+        if self.app_env.lower() in {"production", "prod"}:
+            default_secret = self.auth_secret_key == "mathmaster-local-dev-secret"
+            weak_secret = len(self.auth_secret_key.strip()) < 32
+            default_password = self.bootstrap_admin_password == "admin123"
+            if default_secret or weak_secret or default_password:
+                raise ValueError(
+                    "生产环境必须配置高强度 AUTH_SECRET_KEY 与非默认 BOOTSTRAP_ADMIN_PASSWORD。"
+                )
 
     @property
     def sqlite_path_obj(self) -> Path:
