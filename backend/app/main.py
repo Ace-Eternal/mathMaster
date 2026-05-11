@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api.routes import analysis, audit, auth, chat, dictionary, files, papers, practice, profile, questions, review, search, settings as settings_routes, tasks, templates, users
+from app.api.routes import admin_llm, analysis, audit, auth, chat, dictionary, files, papers, practice, profile, questions, review, search, settings as settings_routes, tasks, templates, users
 from app.core.config import settings
 from app.db.init_db import init_db
 from app.services.pipeline_queue import pipeline_task_queue
@@ -41,6 +41,7 @@ def healthcheck() -> dict[str, str]:
 app.include_router(papers.router, prefix="/api/papers", tags=["papers"])
 app.include_router(auth.router, prefix="/api/auth", tags=["auth"])
 app.include_router(users.router, prefix="/api/users", tags=["users"])
+app.include_router(admin_llm.router, prefix="/api/admin/llm", tags=["admin-llm"])
 app.include_router(audit.router, prefix="/api/audit-logs", tags=["audit"])
 app.include_router(questions.router, prefix="/api/questions", tags=["questions"])
 app.include_router(files.router, prefix="/api/files", tags=["files"])

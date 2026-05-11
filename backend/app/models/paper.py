@@ -99,6 +99,50 @@ class AuditLog(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
 
 
+class LLMProviderConfig(ActorMixin, TimestampMixin, Base):
+    __tablename__ = "llm_provider_config"
+    __table_args__ = (
+        Index("ix_llm_provider_config_name", "name", unique=True),
+        Index("ix_llm_provider_config_enabled", "is_enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False, unique=True)
+    base_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    api_key: Mapped[str] = mapped_column(Text, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    remark: Mapped[str | None] = mapped_column(Text)
+
+
+class LLMScenarioConfig(ActorMixin, TimestampMixin, Base):
+    __tablename__ = "llm_scenario_config"
+    __table_args__ = (
+        Index("ix_llm_scenario_config_code", "scenario_code", unique=True),
+        Index("ix_llm_scenario_config_enabled", "is_enabled"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scenario_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    primary_provider_id: Mapped[int | None] = mapped_column(ForeignKey("llm_provider_config.id"))
+    primary_model: Mapped[str | None] = mapped_column(String(128))
+    fallback_provider_id: Mapped[int | None] = mapped_column(ForeignKey("llm_provider_config.id"))
+    fallback_model: Mapped[str | None] = mapped_column(String(128))
+    temperature: Mapped[float] = mapped_column(Numeric(4, 2), default=0.2, nullable=False)
+    is_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    primary_provider: Mapped["LLMProviderConfig | None"] = relationship(foreign_keys=[primary_provider_id])
+    fallback_provider: Mapped["LLMProviderConfig | None"] = relationship(foreign_keys=[fallback_provider_id])
+
+
+class LLMPromptConfig(ActorMixin, TimestampMixin, Base):
+    __tablename__ = "llm_prompt_config"
+    __table_args__ = (Index("ix_llm_prompt_config_code", "scenario_code", unique=True),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    scenario_code: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    prompt_content: Mapped[str] = mapped_column(Text, nullable=False)
+
+
 class ImportJob(ActorMixin, TimestampMixin, Base):
     __tablename__ = "import_job"
     __table_args__ = (

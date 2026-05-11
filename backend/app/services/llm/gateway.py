@@ -7,16 +7,20 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 import requests
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.db.session import SessionLocal
+from app.services.llm.config import ProviderRuntime, ScenarioRuntime, get_runtime_config, list_models_for_provider
 
 
 class LLMGateway:
-    def __init__(self) -> None:
+    def __init__(self, db: Session | None = None) -> None:
+        self.db = db
         self.base_url = settings.llm_base_url
         self.api_key = settings.llm_api_key
         self.use_mock = bool(settings.llm_use_mock)
-        self.is_packyapi = "packyapi.com" in (self.base_url or "")
 
     def _load_prompt(self, filename: str) -> str:
         return Path(__file__).resolve().parents[1].joinpath("prompts", filename).read_text(encoding="utf-8")
@@ -24,21 +28,15 @@ class LLMGateway:
     def structured_output(self, *, scenario: str, payload: dict[str, Any], model: str | None = None) -> dict[str, Any]:
         if self.use_mock:
             return self._mock_structured_output(scenario=scenario, payload=payload)
-        self._ensure_llm_configured()
+        runtime = self._runtime_config(scenario=scenario, requested_model=model)
+        self._ensure_llm_configured(runtime.primary_provider)
 
-        system_prompt = {
-            "slice_match": self._load_prompt("slice_prompt.md"),
-            "global_answer_match": self._load_prompt("slice_prompt.md"),
-            "full_paper_boundary": self._load_prompt("full_paper_boundary_prompt.md"),
-            "full_answer_boundary": self._load_prompt("full_answer_boundary_prompt.md"),
-            "analysis": self._load_prompt("analysis_prompt.md"),
-        }[scenario]
         request_payload = {
-            "model": model or self._scenario_model(scenario),
+            "model": runtime.primary_model,
             "messages": [
                 {
                     "role": "system",
-                    "content": f"{system_prompt}\n\nYou must return a valid JSON object only.",
+                    "content": f"{runtime.prompt}\n\nYou must return a valid JSON object only.",
                 },
                 {
                     "role": "user",
@@ -48,19 +46,18 @@ class LLMGateway:
                     ),
                 },
             ],
-            "temperature": 0.2,
+            "temperature": runtime.temperature,
         }
-        if not (self.is_packyapi and scenario == "analysis"):
-            request_payload["response_format"] = {"type": "json_object"}
+        request_payload["response_format"] = {"type": "json_object"}
         try:
-            content = self._run_structured_request(request_payload=request_payload)
+            content = self._run_structured_request(request_payload=request_payload, provider=runtime.primary_provider)
             return self._normalize_structured_result(scenario=scenario, payload=payload, result=json.loads(content))
         except Exception as primary_error:  # noqa: BLE001
-            fallback_errors: list[str] = []
-            for fallback_model in self._fallback_models(requested_model=str(request_payload["model"])):
+            fallback_provider, fallback_model = self._fallback_candidate(runtime=runtime, requested_model=str(request_payload["model"]))
+            if fallback_provider and fallback_model:
                 fallback_payload = {**request_payload, "model": fallback_model}
                 try:
-                    content = self._run_structured_request(request_payload=fallback_payload)
+                    content = self._run_structured_request(request_payload=fallback_payload, provider=fallback_provider)
                     parsed = self._normalize_structured_result(
                         scenario=scenario,
                         payload=payload,
@@ -69,12 +66,10 @@ class LLMGateway:
                     parsed["_fallback_notice"] = f"主模型调用失败，已切换备用模型 {fallback_model}: {primary_error}"
                     return parsed
                 except Exception as fallback_error:  # noqa: BLE001
-                    fallback_errors.append(f"{fallback_model}: {fallback_error}")
-            if fallback_errors:
-                raise RuntimeError(
-                    "主模型与备用模型均调用失败。"
-                    f" 主模型错误: {primary_error}; 备用模型错误: {' | '.join(fallback_errors)}"
-                ) from primary_error
+                    raise RuntimeError(
+                        "主模型与备用模型均调用失败。"
+                        f" 主模型错误: {primary_error}; 备用模型错误: {fallback_model}: {fallback_error}"
+                    ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
     def chat(self, *, system_prompt: str, messages: list[dict[str, Any]], model: str | None = None) -> dict[str, Any]:
@@ -85,53 +80,37 @@ class LLMGateway:
                 "model_name": model or settings.default_model_chat,
                 "token_usage": 128,
             }
-        self._ensure_llm_configured()
-        effective_model = self._effective_chat_model(messages=messages, requested_model=model)
+        runtime = self._runtime_config(scenario="chat", requested_model=model)
+        self._ensure_llm_configured(runtime.primary_provider)
 
         request_payload = {
-            "model": effective_model,
+            "model": runtime.primary_model,
             "messages": [{"role": "system", "content": system_prompt}, *messages],
-            "temperature": 0.3,
+            "temperature": runtime.temperature,
         }
         try:
-            if self.is_packyapi:
-                content = self._post_chat_completions_streaming(request_payload=request_payload)
-                return {
-                    "content": content,
-                    "model_name": request_payload["model"],
-                    "token_usage": None,
-                }
-            data = self._post_chat_completions(request_payload=request_payload)
+            data = self._post_chat_completions(request_payload=request_payload, provider=runtime.primary_provider)
             return {
                 "content": self._extract_message_content(data),
                 "model_name": data.get("model", model or settings.default_model_chat),
                 "token_usage": data.get("usage", {}).get("total_tokens"),
             }
         except Exception as primary_error:  # noqa: BLE001
-            fallback_errors: list[str] = []
-            for fallback_model in self._fallback_models(requested_model=str(request_payload["model"])):
+            fallback_provider, fallback_model = self._fallback_candidate(runtime=runtime, requested_model=str(request_payload["model"]))
+            if fallback_provider and fallback_model:
                 fallback_payload = {**request_payload, "model": fallback_model}
                 try:
-                    if self.is_packyapi:
-                        content = self._post_chat_completions_streaming(request_payload=fallback_payload)
-                        return {
-                            "content": content,
-                            "model_name": fallback_model,
-                            "token_usage": None,
-                        }
-                    data = self._post_chat_completions(request_payload=fallback_payload)
+                    data = self._post_chat_completions(request_payload=fallback_payload, provider=fallback_provider)
                     return {
                         "content": self._extract_message_content(data),
                         "model_name": data.get("model", fallback_model),
                         "token_usage": data.get("usage", {}).get("total_tokens"),
                     }
                 except Exception as fallback_error:  # noqa: BLE001
-                    fallback_errors.append(f"{fallback_model}: {fallback_error}")
-            if fallback_errors:
-                raise RuntimeError(
-                    "主模型与备用模型均调用失败。"
-                    f" 主模型错误: {primary_error}; 备用模型错误: {' | '.join(fallback_errors)}"
-                ) from primary_error
+                    raise RuntimeError(
+                        "主模型与备用模型均调用失败。"
+                        f" 主模型错误: {primary_error}; 备用模型错误: {fallback_model}: {fallback_error}"
+                    ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
     def stream_chat(
@@ -148,17 +127,21 @@ class LLMGateway:
             yield {"type": "start", "model_name": model or settings.default_model_chat}
             yield {"type": "chunk", "content": content}
             return
-        self._ensure_llm_configured()
-        effective_model = self._effective_chat_model(messages=messages, requested_model=model)
+        runtime = self._runtime_config(scenario="chat", requested_model=model)
+        self._ensure_llm_configured(runtime.primary_provider)
 
         request_payload = {
-            "model": effective_model,
+            "model": runtime.primary_model,
             "messages": [{"role": "system", "content": system_prompt}, *messages],
-            "temperature": 0.3,
+            "temperature": runtime.temperature,
             "stream": True,
         }
         try:
-            active_model, chunk_iter = self._stream_chat_chunks(request_payload=request_payload, should_stop=should_stop)
+            active_model, chunk_iter = self._stream_chat_chunks(
+                request_payload=request_payload,
+                provider=runtime.primary_provider,
+                should_stop=should_stop,
+            )
             yield {"type": "start", "model_name": active_model}
             try:
                 for chunk in chunk_iter:
@@ -171,11 +154,15 @@ class LLMGateway:
                 if hasattr(chunk_iter, "close"):
                     chunk_iter.close()
         except Exception as primary_error:  # noqa: BLE001
-            fallback_errors: list[str] = []
-            for fallback_model in self._fallback_models(requested_model=str(request_payload["model"])):
+            fallback_provider, fallback_model = self._fallback_candidate(runtime=runtime, requested_model=str(request_payload["model"]))
+            if fallback_provider and fallback_model:
                 fallback_payload = {**request_payload, "model": fallback_model}
                 try:
-                    active_model, chunk_iter = self._stream_chat_chunks(request_payload=fallback_payload, should_stop=should_stop)
+                    active_model, chunk_iter = self._stream_chat_chunks(
+                        request_payload=fallback_payload,
+                        provider=fallback_provider,
+                        should_stop=should_stop,
+                    )
                     yield {
                         "type": "start",
                         "model_name": active_model,
@@ -192,35 +179,38 @@ class LLMGateway:
                         if hasattr(chunk_iter, "close"):
                             chunk_iter.close()
                 except Exception as fallback_error:  # noqa: BLE001
-                    fallback_errors.append(f"{fallback_model}: {fallback_error}")
-            if fallback_errors:
-                raise RuntimeError(
-                    "主模型与备用模型均调用失败。"
-                    f" 主模型错误: {primary_error}; 备用模型错误: {' | '.join(fallback_errors)}"
-                ) from primary_error
+                    raise RuntimeError(
+                        "主模型与备用模型均调用失败。"
+                        f" 主模型错误: {primary_error}; 备用模型错误: {fallback_model}: {fallback_error}"
+                    ) from primary_error
             raise RuntimeError(f"主模型调用失败，且没有可用备用模型: {primary_error}") from primary_error
 
     def list_chat_models(self) -> list[str]:
-        available_models = self._get_available_models()
+        runtime = self._runtime_config(scenario="chat", requested_model=None)
+        try:
+            available_models = self._get_available_models(provider=runtime.primary_provider)
+        except TypeError:
+            available_models = self._get_available_models()
         chat_models = [model for model in available_models if model and model != "omni-moderation-latest"]
         if chat_models:
             return chat_models
 
-        fallback_models = [settings.default_model_chat, settings.fallback_model]
+        fallback_models = [runtime.primary_model, runtime.fallback_model]
         unique_models: list[str] = []
         for model in fallback_models:
             if model and model not in unique_models:
                 unique_models.append(model)
         return unique_models
 
-    def _run_structured_request(self, *, request_payload: dict[str, Any]) -> str:
-        if self.is_packyapi:
-            return self._post_chat_completions_streaming(request_payload=request_payload)
-        data = self._post_chat_completions(request_payload=request_payload)
+    def prompt_for_scenario(self, scenario: str) -> str:
+        return self._runtime_config(scenario=scenario, requested_model=None).prompt
+
+    def _run_structured_request(self, *, request_payload: dict[str, Any], provider: ProviderRuntime | None) -> str:
+        data = self._post_chat_completions(request_payload=request_payload, provider=provider)
         return self._extract_message_content(data)
 
-    def _ensure_llm_configured(self) -> None:
-        if self.base_url and self.api_key:
+    def _ensure_llm_configured(self, provider: ProviderRuntime | None) -> None:
+        if provider and provider.base_url and provider.api_key:
             return
         raise RuntimeError("LLM 未正确配置，且当前未显式开启 mock。请检查 LLM_BASE_URL、LLM_API_KEY 与 LLM_USE_MOCK。")
 
@@ -507,9 +497,11 @@ class LLMGateway:
         ).strip("；")
         return normalized
 
-    def _post_chat_completions(self, *, request_payload: dict[str, Any]) -> dict[str, Any]:
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+    def _post_chat_completions(self, *, request_payload: dict[str, Any], provider: ProviderRuntime | None) -> dict[str, Any]:
+        self._ensure_llm_configured(provider)
+        assert provider is not None
+        url = f"{provider.base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {provider.api_key}"}
         last_error: Exception | None = None
         requested_model = str(request_payload.get("model") or "")
 
@@ -529,20 +521,20 @@ class LLMGateway:
                     last_error = RuntimeError(detail)
                     time.sleep(1.5 * (attempt + 1))
                     continue
-                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
+                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider))
             except requests.RequestException as exc:
                 last_error = exc
                 if attempt < 2:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 detail = f"LLM request failed: {exc}"
-                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model)) from exc
+                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider)) from exc
 
         detail = f"LLM request failed: {last_error}"
-        raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
+        raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider))
 
-    def _post_chat_completions_streaming(self, *, request_payload: dict[str, Any]) -> str:
-        model_name, chunk_iter = self._stream_chat_chunks(request_payload={**request_payload, "stream": True})
+    def _post_chat_completions_streaming(self, *, request_payload: dict[str, Any], provider: ProviderRuntime | None) -> str:
+        model_name, chunk_iter = self._stream_chat_chunks(request_payload={**request_payload, "stream": True}, provider=provider)
         parts = [chunk for chunk in chunk_iter if chunk]
         content = "".join(parts).strip()
         if content:
@@ -553,10 +545,13 @@ class LLMGateway:
         self,
         *,
         request_payload: dict[str, Any],
+        provider: ProviderRuntime | None,
         should_stop: Callable[[], bool] | None = None,
     ) -> tuple[str, Iterator[str]]:
-        url = f"{self.base_url.rstrip('/')}/chat/completions"
-        headers = {"Authorization": f"Bearer {self.api_key}"}
+        self._ensure_llm_configured(provider)
+        assert provider is not None
+        url = f"{provider.base_url.rstrip('/')}/chat/completions"
+        headers = {"Authorization": f"Bearer {provider.api_key}"}
         payload = {**request_payload, "stream": True}
         requested_model = str(payload.get("model") or "")
         last_error: Exception | None = None
@@ -577,7 +572,7 @@ class LLMGateway:
                         last_error = RuntimeError(detail)
                         time.sleep(1.5 * (attempt + 1))
                         continue
-                    raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
+                    raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider))
 
                 def iterator() -> Iterator[str]:
                     try:
@@ -605,10 +600,10 @@ class LLMGateway:
                     time.sleep(1.5 * (attempt + 1))
                     continue
                 detail = f"LLM streaming request failed: {exc}"
-                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model)) from exc
+                raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider)) from exc
 
         detail = f"LLM streaming request failed: {last_error}"
-        raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model))
+        raise RuntimeError(self._append_model_inventory_hint(detail, requested_model=requested_model, provider=provider))
 
     @staticmethod
     def _extract_error_detail(response: requests.Response) -> str:
@@ -636,14 +631,7 @@ class LLMGateway:
         raise RuntimeError(f"LLM returned empty content: {data}")
 
     def _effective_chat_model(self, *, messages: list[dict[str, Any]], requested_model: str | None) -> str:
-        model_name = requested_model or settings.default_model_chat
-        if not self.is_packyapi:
-            return model_name
-        if model_name != "gpt-5.4-mini":
-            return model_name
-        if self._messages_contain_images(messages):
-            return "gpt-5.4-high"
-        return model_name
+        return self._runtime_config(scenario="chat", requested_model=requested_model).primary_model
 
     @staticmethod
     def _messages_contain_images(messages: list[dict[str, Any]]) -> bool:
@@ -656,8 +644,8 @@ class LLMGateway:
                     return True
         return False
 
-    def _append_model_inventory_hint(self, detail: str, *, requested_model: str) -> str:
-        available_models = self._get_available_models()
+    def _append_model_inventory_hint(self, detail: str, *, requested_model: str, provider: ProviderRuntime | None) -> str:
+        available_models = self._get_available_models(provider=provider)
         chat_models = [model for model in available_models if model != "omni-moderation-latest"]
         if not available_models:
             return detail
@@ -667,38 +655,24 @@ class LLMGateway:
             return f"{detail}；当前 PackyAPI 账户下未发现可用聊天模型，/models 仅返回: {', '.join(available_models)}"
         return f"{detail}；当前 /models 可见模型: {', '.join(available_models)}"
 
-    def _get_available_models(self) -> list[str]:
+    def _get_available_models(self, provider: ProviderRuntime | None = None) -> list[str]:
+        if provider is None:
+            return []
         try:
-            response = requests.get(
-                f"{self.base_url.rstrip('/')}/models",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                timeout=min(settings.llm_timeout_seconds, 20),
-            )
-            response.raise_for_status()
-            payload = response.json()
+            return list_models_for_provider(provider, timeout_seconds=min(settings.llm_timeout_seconds, 20))
         except Exception:
             return []
-
-        models = payload.get("data") or []
-        return [str(item.get("id")) for item in models if item.get("id")]
 
     @staticmethod
     def _scenario_model(scenario: str) -> str:
         if scenario in {"slice_match", "global_answer_match", "full_paper_boundary", "full_answer_boundary"}:
-            if "packyapi.com" in (settings.llm_base_url or ""):
-                return "gpt-5.4-high"
             return settings.default_model_slice
         if scenario == "analysis":
-            if "packyapi.com" in (settings.llm_base_url or ""):
-                return "gpt-5.4-high"
             return settings.default_model_analysis
         return settings.default_model_chat
 
     def _fallback_models(self, *, requested_model: str) -> list[str]:
-        available_models = self._get_available_models()
         candidates: list[str] = []
-        if self.is_packyapi:
-            candidates.extend(["gpt-5.4-high", "gpt-5.2-medium", "gpt-5.2", "gpt-5.4"])
         if settings.fallback_model:
             candidates.append(settings.fallback_model)
 
@@ -706,11 +680,53 @@ class LLMGateway:
         for model in candidates:
             if not model or model == requested_model:
                 continue
-            if available_models and model not in available_models:
-                continue
             if model not in deduped:
                 deduped.append(model)
         return deduped
+
+    def _runtime_config(self, *, scenario: str, requested_model: str | None) -> ScenarioRuntime:
+        if self.db is not None:
+            return get_runtime_config(self.db, scenario, requested_model)
+        try:
+            with SessionLocal() as db:
+                return get_runtime_config(db, scenario, requested_model)
+        except SQLAlchemyError:
+            return self._settings_runtime_config(scenario=scenario, requested_model=requested_model)
+
+    def _settings_runtime_config(self, *, scenario: str, requested_model: str | None) -> ScenarioRuntime:
+        provider = ProviderRuntime(
+            id=None,
+            name="环境变量配置",
+            base_url=self.base_url or "",
+            api_key=self.api_key or "",
+        ) if self.base_url and self.api_key else None
+        prompt_file = {
+            "slice_match": "slice_prompt.md",
+            "global_answer_match": "slice_prompt.md",
+            "full_paper_boundary": "full_paper_boundary_prompt.md",
+            "full_answer_boundary": "full_answer_boundary_prompt.md",
+            "analysis": "analysis_prompt.md",
+            "chat": "chat_system_prompt.md",
+        }[scenario]
+        return ScenarioRuntime(
+            scenario_code=scenario,
+            prompt=self._load_prompt(prompt_file),
+            primary_provider=provider,
+            primary_model=requested_model or self._scenario_model(scenario),
+            fallback_provider=provider,
+            fallback_model=settings.fallback_model,
+            temperature=0.3 if scenario == "chat" else 0.2,
+        )
+
+    @staticmethod
+    def _fallback_candidate(
+        *,
+        runtime: ScenarioRuntime,
+        requested_model: str,
+    ) -> tuple[ProviderRuntime | None, str | None]:
+        if not runtime.fallback_model or runtime.fallback_model == requested_model:
+            return None, None
+        return runtime.fallback_provider, runtime.fallback_model
 
     @staticmethod
     def _mock_structured_output(*, scenario: str, payload: dict[str, Any]) -> dict[str, Any]:

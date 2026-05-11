@@ -28,7 +28,7 @@ const logout = async () => {
         <RouterLink class="nav-link" to="/templates">解题模板</RouterLink>
         <RouterLink class="nav-link" to="/profile">个人中心</RouterLink>
         <RouterLink v-if="auth.isSuperAdmin" class="nav-link" to="/users">用户管理</RouterLink>
-        <RouterLink class="nav-link" to="/settings">系统设置</RouterLink>
+        <RouterLink v-if="auth.isSuperAdmin" class="nav-link" to="/settings">系统设置</RouterLink>
       </nav>
       <div class="topbar__user">
         <span>{{ auth.user?.display_name || auth.user?.username }}</span>

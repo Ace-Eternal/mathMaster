@@ -6,6 +6,7 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db.session import engine
 from app.services.auth import bootstrap_auth_data
+from app.services.llm.config import bootstrap_llm_config
 import app.models  # noqa: F401
 
 
@@ -156,3 +157,4 @@ def init_db() -> None:
 
     with SessionLocal() as db:
         bootstrap_auth_data(db)
+        bootstrap_llm_config(db)

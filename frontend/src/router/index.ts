@@ -57,8 +57,8 @@ router.beforeEach(async (to) => {
   if (to.path === '/login' && auth.isAuthenticated) {
     return '/papers'
   }
-  if (to.path === '/users' && !auth.isSuperAdmin) {
-    ElMessage.warning('无权限访问用户管理。')
+  if ((to.path === '/users' || to.path === '/settings') && !auth.isSuperAdmin) {
+    ElMessage.warning('无权限访问系统管理。')
     return '/profile'
   }
   return true

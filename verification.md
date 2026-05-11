@@ -264,3 +264,11 @@
 - 实现：答案显隐统一为眼睛/眼睛斜杠图标按钮；随机刷题状态改为下拉框，状态项使用白/黄/绿实心圆点加文字；收藏改为星标按钮，未收藏为空心星，已收藏为黄色实心星；个人中心刷题列表同步使用状态圆点和星标。
 - 前端验证：`cd frontend; npm run build` 通过；构建产物不再包含 `127.0.0.1:8000`。
 - 远端验证：已部署到 `http://106.54.35.68:8080/`，Nginx 配置检查通过，首页返回 200。
+
+## 2026-05-11 14:xx:xx +08:00 - LLM 配置中心与 Prompt 管理验证
+
+- 执行者：Codex。
+- 实现：新增仅 `SUPER_ADMIN` 可用的 LLM 配置中心，支持 OpenAI-compatible 供应商、按场景主/备供应商模型、Prompt 当前版编辑、供应商测试调用、API Key 脱敏响应和审计记录。
+- 后端验证：`cd backend; uv run pytest -q` 通过，`68 passed, 22 warnings in 12.13s`。
+- 前端验证：`cd frontend; npm run build` 通过，`vue-tsc --noEmit && vite build` 成功。
+- 备注：warnings 为既有 `datetime.utcnow()` 弃用提示、npm 用户配置提示、Vite 大 chunk 警告和 npm 新版本提示；均不阻塞本次功能。

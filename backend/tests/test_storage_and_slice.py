@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.api.routes import admin_llm as admin_llm_routes
 from app.api.routes import papers as paper_routes
 from app.api.routes import templates as template_routes
 from app.api.routes import users as user_routes
@@ -16,7 +17,7 @@ from app.core.config import settings
 from app.db.base import Base
 from app.db import init_db as init_db_module
 from app.db.session import get_db
-from app.models import AnswerSheet, AppUser, AuditLog, ChatMessage, ChatSession, ConversionJob, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, Role, RolePermission, SolutionMethod, SolutionTemplate, UserPermission
+from app.models import AnswerSheet, AppUser, AuditLog, ChatMessage, ChatSession, ConversionJob, LLMProviderConfig, LLMPromptConfig, LLMScenarioConfig, Paper, PipelineTask, Question, QuestionAnswer, QuestionAnalysis, QuestionKnowledge, QuestionMethod, KnowledgePoint, ReviewRecord, Role, RolePermission, SolutionMethod, SolutionTemplate, UserPermission
 from app.schemas.question import QuestionCreateRequest, QuestionUpdateRequest, ReviewUpdateRequest
 from app.schemas.template import SolutionTemplateCreate, SolutionTemplateUpdate
 from app.services.analysis import KnowledgeAnalysisService
@@ -28,6 +29,7 @@ from app.services.pipeline_queue import PipelineTaskQueue
 from app.services.pipeline_queue import TASK_TYPE_MINEU_CONVERT, TASK_TYPE_SLICE_MATCH
 from app.services.chat import ChatTutorService, chat_generation_registry
 from app.services.auth import authenticate_user, bootstrap_auth_data, create_access_token, user_permissions
+from app.services.llm.config import bootstrap_llm_config
 from app.services.practice import PracticeService
 from app.services.profile import ProfileService
 from app.services.review import ReviewService
@@ -123,6 +125,18 @@ def make_users_api_client(session_factory):
     return TestClient(app)
 
 
+def make_admin_llm_api_client(session_factory):
+    app = FastAPI()
+    app.include_router(admin_llm_routes.router, prefix="/api/admin/llm")
+
+    def override_get_db():
+        with session_factory() as db:
+            yield db
+
+    app.dependency_overrides[get_db] = override_get_db
+    return TestClient(app)
+
+
 def test_pipeline_task_queue_enqueue_creates_queued_task(tmp_path):
     session_factory = make_pipeline_queue_session(tmp_path)
     queue = PipelineTaskQueue()
@@ -195,6 +209,85 @@ def test_users_api_requires_super_admin_role(tmp_path):
     assert allowed.status_code == 200
     assert created.status_code == 200
     assert created.json()["roles"] == ["STUDENT"]
+
+
+def test_admin_llm_api_requires_super_admin_role(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    with session_factory() as db:
+        student = AppUser(username="student", display_name="学生", password_hash="x", status="ACTIVE")
+        db.add(student)
+        db.commit()
+        bootstrap_auth_data(db)
+        student_token = create_access_token(student)
+
+    client = make_admin_llm_api_client(session_factory)
+
+    forbidden = client.get("/api/admin/llm/providers", headers={"Authorization": f"Bearer {student_token}"})
+    allowed = client.get("/api/admin/llm/providers", headers=auth_headers(session_factory))
+
+    assert forbidden.status_code == 403
+    assert allowed.status_code == 200
+
+
+def test_admin_llm_api_manages_provider_scenarios_and_prompts(tmp_path):
+    session_factory = make_pipeline_queue_session(tmp_path)
+    client = make_admin_llm_api_client(session_factory)
+    headers = auth_headers(session_factory)
+
+    created = client.post(
+        "/api/admin/llm/providers",
+        headers=headers,
+        json={
+            "name": "DeepSeek",
+            "base_url": "https://api.deepseek.com/v1",
+            "api_key": "sk-deepseek-secret",
+            "is_enabled": True,
+            "remark": "测试供应商",
+        },
+    )
+    provider_id = created.json()["id"]
+    patched = client.patch(
+        f"/api/admin/llm/providers/{provider_id}",
+        headers=headers,
+        json={"api_key": "", "remark": "保留旧密钥"},
+    )
+
+    scenarios = client.put(
+        "/api/admin/llm/scenarios",
+        headers=headers,
+        json={
+            "scenarios": [
+                {
+                    "scenario_code": "chat",
+                    "primary_provider_id": provider_id,
+                    "primary_model": "deepseek-chat",
+                    "fallback_provider_id": provider_id,
+                    "fallback_model": "deepseek-reasoner",
+                    "temperature": 0.4,
+                    "is_enabled": True,
+                }
+            ]
+        },
+    )
+    prompts = client.put(
+        "/api/admin/llm/prompts",
+        headers=headers,
+        json={"prompts": [{"scenario_code": "chat", "prompt_content": "你是新的讲题助手。"}]},
+    )
+
+    assert created.status_code == 200
+    assert created.json()["api_key_masked"] == "sk-d********cret"
+    assert "api_key" not in created.json()
+    assert patched.status_code == 200
+    with session_factory() as db:
+        provider = db.get(LLMProviderConfig, provider_id)
+        assert provider.api_key == "sk-deepseek-secret"
+    assert scenarios.status_code == 200
+    chat_scenario = next(item for item in scenarios.json() if item["scenario_code"] == "chat")
+    assert chat_scenario["primary_model"] == "deepseek-chat"
+    assert prompts.status_code == 200
+    chat_prompt = next(item for item in prompts.json() if item["scenario_code"] == "chat")
+    assert chat_prompt["prompt_content"] == "你是新的讲题助手。"
 
 
 def test_profile_revised_questions_are_owned_by_audit_actor_not_latest_editor():
@@ -1852,9 +1945,8 @@ def test_llm_gateway_list_chat_models_falls_back_to_defaults():
     assert settings.fallback_model in models
 
 
-def test_llm_gateway_uses_high_for_multimodal_packy_chat():
+def test_llm_gateway_uses_requested_chat_model_without_provider_hardcoding():
     gateway = LLMGateway()
-    gateway.is_packyapi = True
     messages = [
         {
             "role": "user",
@@ -1864,11 +1956,28 @@ def test_llm_gateway_uses_high_for_multimodal_packy_chat():
             ],
         }
     ]
-    assert gateway._effective_chat_model(messages=messages, requested_model="gpt-5.4-mini") == "gpt-5.4-high"
+    assert gateway._effective_chat_model(messages=messages, requested_model="deepseek-chat") == "deepseek-chat"
 
 
-def test_llm_gateway_keeps_mini_for_text_only_packy_chat():
-    gateway = LLMGateway()
-    gateway.is_packyapi = True
-    messages = [{"role": "user", "content": "请讲解这道题。"}]
-    assert gateway._effective_chat_model(messages=messages, requested_model="gpt-5.4-mini") == "gpt-5.4-mini"
+def test_llm_gateway_reads_chat_model_and_prompt_from_config_center():
+    engine = create_engine("sqlite+pysqlite:///:memory:", connect_args={"check_same_thread": False})
+    Base.metadata.create_all(engine)
+    with Session(engine) as db:
+        bootstrap_llm_config(db)
+        provider = LLMProviderConfig(name="DeepSeek", base_url="https://api.deepseek.com/v1", api_key="sk-test")
+        db.add(provider)
+        db.flush()
+        scenario = db.execute(select(LLMScenarioConfig).where(LLMScenarioConfig.scenario_code == "chat")).scalar_one()
+        scenario.primary_provider_id = provider.id
+        scenario.primary_model = "deepseek-chat"
+        scenario.fallback_provider_id = provider.id
+        scenario.fallback_model = "deepseek-reasoner"
+        prompt = db.execute(select(LLMPromptConfig).where(LLMPromptConfig.scenario_code == "chat")).scalar_one()
+        prompt.prompt_content = "配置中心 Prompt"
+        db.commit()
+
+        gateway = LLMGateway(db)
+
+        assert gateway._effective_chat_model(messages=[], requested_model=None) == "deepseek-chat"
+        assert gateway.prompt_for_scenario("chat") == "配置中心 Prompt"
+        assert gateway.list_chat_models() == ["deepseek-chat", "deepseek-reasoner"]

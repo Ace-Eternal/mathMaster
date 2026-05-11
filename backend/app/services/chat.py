@@ -76,9 +76,6 @@ class ChatTutorService:
     def __init__(self, db: Session, llm_gateway: LLMGateway) -> None:
         self.db = db
         self.llm_gateway = llm_gateway
-        self.system_prompt = Path(__file__).resolve().parent.joinpath("prompts", "chat_system_prompt.md").read_text(
-            encoding="utf-8"
-        )
 
     def send(
         self,
@@ -346,8 +343,14 @@ class ChatTutorService:
         )
 
     def _build_system_prompt(self) -> str:
+        if hasattr(self.llm_gateway, "prompt_for_scenario"):
+            system_prompt = self.llm_gateway.prompt_for_scenario("chat")
+        else:
+            system_prompt = Path(__file__).resolve().parent.joinpath("prompts", "chat_system_prompt.md").read_text(
+                encoding="utf-8"
+            )
         return (
-            f"{self.system_prompt}\n\n"
+            f"{system_prompt}\n\n"
             "当前提供给你的只有题目侧上下文，不保证包含标准答案或解析。"
             "你已经拿到了完整题目上下文，不要要求用户重复发送题目，不要谈代码、bug、功能开发。"
             "请直接围绕当前数学题进行教学式讲解。"

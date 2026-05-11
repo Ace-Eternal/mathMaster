@@ -1,12 +1,14 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 
 from app.core.config import settings
+from app.models import AppUser
+from app.services.auth import require_super_admin
 
 router = APIRouter()
 
 
 @router.get("")
-def get_settings_overview():
+def get_settings_overview(_actor: AppUser = Depends(require_super_admin)):
     return {
         "database_backend": settings.database_backend,
         "sqlite_path": settings.sqlite_path,
