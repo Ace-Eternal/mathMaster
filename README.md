@@ -105,6 +105,45 @@ npm install
 npm run dev
 ```
 
+## Docker 镜像仓库部署
+
+生产部署使用 GitHub Container Registry 镜像，服务器不需要构建前后端源码。
+
+镜像地址：
+
+- `ghcr.io/ace-eternal/mathmaster-backend`
+- `ghcr.io/ace-eternal/mathmaster-frontend`
+
+推送到 `main` 或手动运行 `Build Docker Images` GitHub Actions 后，会发布 `latest` 与 `sha-*` 标签。服务器准备 `docker-compose.prod.yml` 和生产 `.env` 后执行：
+
+```bash
+docker compose -f docker-compose.prod.yml pull
+docker compose -f docker-compose.prod.yml up -d
+```
+
+指定不可变版本时使用：
+
+```bash
+IMAGE_TAG=sha-提交短哈希 docker compose -f docker-compose.prod.yml up -d
+```
+
+生产 `.env` 至少需要：
+
+```env
+MYSQL_ROOT_PASSWORD=强密码
+AUTH_SECRET_KEY=至少32位高熵随机字符串
+BOOTSTRAP_ADMIN_PASSWORD=非默认强密码
+CORS_ORIGINS=["https://你的域名"]
+MINEU_BASE_URL=你的 MineU API 地址
+MINEU_API_KEY=轮换后的 MineU Key
+MINEU_USE_MOCK=false
+LLM_BASE_URL=你的 OpenAI 兼容中转地址
+LLM_API_KEY=轮换后的 LLM Key
+LLM_USE_MOCK=false
+```
+
+后端容器不映射公网端口，前端 Nginx 容器通过 Docker 内网访问 `backend:8000`。
+
 ## 主要页面
 
 - `/papers`：单份上传、文件夹导入、配对结果、试卷列表
